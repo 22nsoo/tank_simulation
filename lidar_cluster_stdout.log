@@ -1,0 +1,34 @@
+================================================================================
+Tank Challenge LiDAR-first YOLO Fusion Server v16.6 Top-View Hill/Flat Target Scan
+LiDAR overlay: realtime cached path
+YOLO fusion: asynchronous slower path
+Fusion method: object-above-hill LiDAR ROI first, angle-cluster fallback second
+Tilt compensation: local LiDAR ground-plane estimate
+YOLO queue: one latest pending frame; stale queued frame replacement enabled
+Anti-hunt aim: smoothed target angle + proportional turret command
+Label format: tank | distance | body-relative angle
+YOLO model expected at: C:\Users\acorn\Documents\Tank Challenge\YOLO.pt
+Health       : http://127.0.0.1:5000/health
+Status       : http://127.0.0.1:5000/status
+Fusion status: http://127.0.0.1:5000/fusion_status
+Fusion debug : http://127.0.0.1:5000/fusion_debug
+Tilt status  : http://127.0.0.1:5000/tilt_status
+Fusion preset: http://127.0.0.1:5000/fusion_preset?mode=balanced
+GT status    : http://127.0.0.1:5000/gt_status
+Web LiDAR    : http://127.0.0.1:5000/lidar_view  (360 top view)
+LiDAR JSON   : http://127.0.0.1:5000/lidar_status
+Aim status   : http://127.0.0.1:5000/aim_status
+Fire status  : http://127.0.0.1:5000/fire_status
+Action debug : http://127.0.0.1:5000/action_debug
+GT dashboard : http://127.0.0.1:5000/gt_dashboard
+GT state dbg : http://127.0.0.1:5000/gt_state_debug
+GT restore   : http://127.0.0.1:5000/gt_restore_last_map
+Map GT list  : http://127.0.0.1:5000/map_gt_list
+Map GT load  : http://127.0.0.1:5000/map_gt_load?filename=YOUR_MAP.map
+Payload debug: http://127.0.0.1:5000/payload_debug
+YOLO preload : http://127.0.0.1:5000/yolo_preload
+Hill map     : http://127.0.0.1:5000/hill_map_height_status
+Recommended  : Interval=0.5, Y=3, Channel=32, Minimap=16, Range=120, FPS=120, Graphics=Ultra
+================================================================================
+ * Serving Flask app 'lidar_cluster'
+ * Debug mode: off

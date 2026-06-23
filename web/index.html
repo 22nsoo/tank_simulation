@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tank Battlefield Awareness</title>
+  <link rel="stylesheet" href="/web/styles.css">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <section class="topbar">
+      <div>
+        <h1>전장상황 인식 콘솔</h1>
+        <p id="eventText">서버 연결 대기</p>
+      </div>
+      <div class="status-grid">
+        <div><span>모델</span><strong id="modelName">-</strong></div>
+        <div><span>탐지</span><strong id="detectCount">0</strong></div>
+        <div><span>경로</span><strong id="pathState">0 / 0</strong></div>
+      </div>
+    </section>
+
+    <section class="main-grid">
+      <div class="video-panel">
+        <div class="panel-head">
+          <h2>이미지 센서</h2>
+          <span id="captureName">no frame</span>
+        </div>
+        <div class="camera-stage">
+          <img id="cameraImage" alt="sensor frame">
+          <canvas id="overlayCanvas"></canvas>
+          <div id="emptyFrame">수집된 이미지가 없습니다</div>
+        </div>
+      </div>
+
+      <aside class="control-panel">
+        <section>
+          <h2>목적지</h2>
+          <div class="input-row">
+            <label>X <input id="destX" type="number" value="100"></label>
+            <label>Z <input id="destZ" type="number" value="250"></label>
+            <button id="setDestBtn">설정</button>
+          </div>
+          <label class="toggle-row">
+            <input id="lidarNavToggle" type="checkbox">
+            <span>LiDAR 회피 사용</span>
+          </label>
+        </section>
+
+        <section>
+          <h2>전차 상태</h2>
+          <dl class="metrics">
+            <div><dt>위치</dt><dd id="positionText">-</dd></div>
+            <div><dt>포탑</dt><dd id="turretText">-</dd></div>
+            <div><dt>명령</dt><dd id="actionText">-</dd></div>
+            <div><dt>표적</dt><dd id="targetText">-</dd></div>
+            <div><dt>LiDAR</dt><dd id="lidarText">-</dd></div>
+            <div><dt>DB</dt><dd id="databaseText">-</dd></div>
+          </dl>
+        </section>
+
+        <section>
+          <h2>표적 추적</h2>
+          <div class="target-strip" id="targetStrip">
+            <span id="targetStateBadge">표적 없음</span>
+            <strong id="targetStateText">-</strong>
+          </div>
+          <div class="fire-confirm" id="fireConfirmPanel">
+            <span id="fireConfirmText">표적 발견 시 조준 후 발사 승인을 기다립니다</span>
+            <button id="confirmFireBtn" class="danger-button" disabled>발사</button>
+          </div>
+          <dl class="metrics">
+            <div><dt>오차</dt><dd id="targetErrorText">-</dd></div>
+            <div><dt>신뢰도</dt><dd id="targetConfidenceText">-</dd></div>
+            <div><dt>후보</dt><dd id="targetCandidateText">-</dd></div>
+          </dl>
+          <div class="tactical-chat">
+            <div class="chat-log" id="chatLog">
+              <div class="chat-message assistant">현재 표적/경로/LiDAR 상태를 기준으로 답변합니다.</div>
+            </div>
+            <form class="chat-form" id="chatForm">
+              <input id="chatInput" type="text" autocomplete="off" placeholder="전술 상태 질문">
+              <button type="submit" class="ghost-button">질문</button>
+            </form>
+          </div>
+        </section>
+
+        <section>
+          <h2>회피 디버그</h2>
+          <dl class="metrics">
+            <div><dt>장애물</dt><dd id="obstacleDebugText">-</dd></div>
+            <div><dt>마진</dt><dd id="marginDebugText">-</dd></div>
+          </dl>
+        </section>
+
+        <section>
+          <h2>교전 기록</h2>
+          <dl class="metrics">
+            <div><dt>탄착</dt><dd id="bulletText">-</dd></div>
+            <div><dt>충돌</dt><dd id="collisionText">-</dd></div>
+          </dl>
+        </section>
+      </aside>
+    </section>
+
+    <section class="map-panel">
+      <div class="panel-head">
+        <h2>전장 지도</h2>
+        <span>지도 클릭으로 목적지 설정 · 300 x 300</span>
+      </div>
+      <canvas id="mapCanvas" width="900" height="420"></canvas>
+      <div class="map-legend">
+        <span><i class="legend-tank"></i> 전차</span>
+        <span><i class="legend-dest"></i> 목적지</span>
+        <span><i class="legend-path"></i> 경로</span>
+        <span><i class="legend-obstacle"></i> 기본 장애물</span>
+        <span><i class="legend-lidar"></i> LiDAR 장애물</span>
+        <span><i class="legend-margin"></i> 회피 margin</span>
+      </div>
+    </section>
+
+    <section class="analytics-panel">
+      <div class="panel-head">
+        <h2>Plotly 분석 대시보드</h2>
+        <button id="refreshAnalyticsBtn" class="ghost-button">새로고침</button>
+      </div>
+      <div class="plot-grid">
+        <div id="trajectoryPlot" class="plot-box"></div>
+        <div id="lidarPlot" class="plot-box"></div>
+        <div id="commandPlot" class="plot-box"></div>
+        <div id="targetPlot" class="plot-box"></div>
+      </div>
+    </section>
+
+    <section class="log-panel">
+      <div class="panel-head">
+        <h2>주행 로그</h2>
+        <div class="db-controls">
+          <span id="logFileText">drive_logs/drive_log.csv</span>
+          <button id="clearLogsBtn" class="danger-button">로그+라이다 초기화</button>
+        </div>
+      </div>
+      <div class="log-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>시간</th>
+              <th>위치</th>
+              <th>명령</th>
+              <th>표적</th>
+              <th>LiDAR</th>
+              <th>이벤트</th>
+            </tr>
+          </thead>
+          <tbody id="driveLogBody">
+            <tr><td colspan="6">로그 대기 중</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="db-panel">
+      <div class="panel-head">
+        <h2>PostgreSQL 테이블 뷰어</h2>
+        <div class="db-controls">
+          <select id="dbTableSelect">
+            <option value="drive_logs">drive_logs</option>
+            <option value="detections">detections</option>
+            <option value="lidar_summaries">lidar_summaries</option>
+            <option value="events">events</option>
+          </select>
+          <input id="dbLimitInput" type="number" value="100" min="1" max="500">
+          <button id="loadDbTableBtn" class="ghost-button">조회</button>
+        </div>
+      </div>
+      <div id="dbStatusText" class="db-status">DB 상태 확인 중</div>
+      <div class="log-table-wrap">
+        <table id="dbTable">
+          <thead id="dbTableHead"></thead>
+          <tbody id="dbTableBody">
+            <tr><td>조회 대기 중</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script src="/web/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+from pathlib import Path
+import os
+
+BASE_DIR = Path(__file__).resolve().parent
+WEB_DIR = BASE_DIR / "web"
+CAPTURE_DIR = BASE_DIR / "capture_images"
+LIDAR_DIR = BASE_DIR / "lidar_data"
+DRIVE_LOG_DIR = BASE_DIR / "drive_logs"
+DRIVE_LOG_PATH = DRIVE_LOG_DIR / "drive_log.csv"
+OBSTACLE_CACHE_PATH = BASE_DIR / "obstacle_cache.json"
+SLAM_CACHE_PATH = BASE_DIR / "slam_map.json"
+MODEL_PATH = BASE_DIR / "lalast.pt"
+
+DB_CONFIG = {
+    "host": os.environ.get("DB_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("DB_PORT", "5432")),
+    "dbname": os.environ.get("DB_NAME", "tank_challenge"),
+    "user": os.environ.get("DB_USER", "postgres"),
+    "password": "22nsoo",
+    "connect_timeout": 1,
+}
+
+GRID_SIZE = 5.0
+MAP_X_MIN = 0
+MAP_X_MAX = 300
+MAP_Z_MIN = 0
+MAP_Z_MAX = 300
+
+WAYPOINT_THRESHOLD = 2.0
+GOAL_THRESHOLD = 2.0
+REPLAN_DISTANCE = 25.0
+ANGLE_THRESHOLD = 10.0
+
+LOOKAHEAD_WAYPOINTS = 2
+OBSTACLE_CELL_MARGIN = 4.0
+OBSTACLE_CLEAR_MARGIN = 5.0
+OBSTACLE_SIZE_MARGIN_FACTOR = 0.18
+OBSTACLE_MAX_EXTRA_MARGIN = 5.0
+START_CLEAR_RADIUS = 3.0
+OBSTACLE_ESCAPE_MARGIN = 3.0
+OBSTACLE_SLOW_DISTANCE = 28.0
+
+LIDAR_MAX_DISTANCE = 35.0
+LIDAR_NEAR_DISTANCE = 18.0
+LIDAR_POINT_MARGIN = 2.5
+LIDAR_MAX_OBSTACLES = 80
+LIDAR_API_STALE_SECONDS = 1.5
+SLAM_NEAR_RADIUS = 90.0
+
+TARGET_CENTER_TOLERANCE = 0.08
+TARGET_CANDIDATE_CONFIDENCE = 0.60
+TARGET_LOCK_CONFIDENCE = 0.75
+TARGET_LOCK_FRAMES = 2
+TARGET_MATCH_TOLERANCE = 0.18
+FIRE_CONFIDENCE = 0.85
+DETECTION_STALE_SECONDS = 2.0
+TARGET_HOLD_SECONDS = 2.0
+FIRE_APPROVAL_SECONDS = 1.2
+ATTACK_TARGET_CLASSES = {
+    0: "Ally",
+    1: "Enemy",
+    2: "House",
+    3: "Rock",
+    4: "Rock_L",
+    5: "Tank_enemy",
+    6: "Tent",
+    7: "car",
+}
+
+ROI_X_MIN = 0.15
+ROI_X_MAX = 0.85
+ROI_Y_MIN = 0.15
+ROI_Y_MAX = 0.85

@@ -1,0 +1,61 @@
+{
+    "terrainIndex": 3,
+    "obstacles": [
+        {
+            "prefabName": "Rock002_120m_Front",
+            "position": {
+                "x": 150.0,
+                "y": 9.502197265625,
+                "z": 270.0
+            },
+            "rotation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "w": 1.0
+            }
+        },
+        {
+            "prefabName": "Rock002_100m_Right",
+            "position": {
+                "x": 250.0,
+                "y": 9.502197265625,
+                "z": 150.0
+            },
+            "rotation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "w": 1.0
+            }
+        },
+        {
+            "prefabName": "Rock002_80m_Rear",
+            "position": {
+                "x": 150.0,
+                "y": 9.502197265625,
+                "z": 70.0
+            },
+            "rotation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "w": 1.0
+            }
+        },
+        {
+            "prefabName": "Rock002_60m_Left",
+            "position": {
+                "x": 90.0,
+                "y": 9.502197265625,
+                "z": 150.0
+            },
+            "rotation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "w": 1.0
+            }
+        }
+    ]
+}

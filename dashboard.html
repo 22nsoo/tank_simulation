@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>전차 경로 대시보드</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #eee; font-family: monospace; display: flex; height: 100vh; overflow: hidden; }
+
+  #sidebar {
+    width: 280px; min-width: 280px; background: #16213e;
+    padding: 16px; display: flex; flex-direction: column; gap: 12px;
+    border-right: 1px solid #0f3460; overflow-y: auto;
+  }
+  h2 { color: #e94560; font-size: 14px; letter-spacing: 2px; text-transform: uppercase; }
+  h3 { color: #a0a0c0; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+
+  .card { background: #0f3460; border-radius: 8px; padding: 12px; }
+
+  .stat { display: flex; justify-content: space-between; font-size: 12px; margin: 3px 0; }
+  .stat span:last-child { color: #e94560; font-weight: bold; }
+
+  .btn {
+    width: 100%; padding: 8px; border: none; border-radius: 6px;
+    cursor: pointer; font-size: 12px; font-weight: bold; letter-spacing: 1px;
+    transition: opacity 0.2s;
+  }
+  .btn:hover { opacity: 0.8; }
+  .btn-plan  { background: #e94560; color: #fff; }
+  .btn-clear { background: #533483; color: #fff; }
+  .btn-go    { background: #0f9b58; color: #fff; }
+
+  input[type=number] {
+    width: 100%; padding: 6px 8px; background: #1a1a2e; border: 1px solid #0f3460;
+    border-radius: 4px; color: #eee; font-size: 12px; margin-top: 4px;
+  }
+  label { font-size: 11px; color: #a0a0c0; }
+
+  #log {
+    flex: 1; background: #0a0a1a; border-radius: 6px; padding: 8px;
+    font-size: 10px; overflow-y: auto; color: #7ec8e3; line-height: 1.5;
+    max-height: 200px;
+  }
+
+  #map-container { flex: 1; position: relative; }
+  canvas { display: block; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 10px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+  #status-bar {
+    position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7);
+    padding: 6px 10px; border-radius: 6px; font-size: 11px; color: #7ec8e3;
+  }
+  #click-hint {
+    position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.6);
+    padding: 4px 8px; border-radius: 4px; font-size: 10px; color: #a0a0c0;
+  }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h2>🪖 Tank Dashboard</h2>
+
+  <div class="card">
+    <h3>전차 상태</h3>
+    <div class="stat"><span>위치 X</span><span id="s-x">-</span></div>
+    <div class="stat"><span>위치 Z</span><span id="s-z">-</span></div>
+    <div class="stat"><span>Heading</span><span id="s-h">-</span></div>
+    <div class="stat"><span>WP 인덱스</span><span id="s-wp">-</span></div>
+    <div class="stat"><span>WP까지 거리</span><span id="s-dist">-</span></div>
+    <div class="stat"><span>오차</span><span id="s-err">-</span></div>
+  </div>
+
+  <div class="card">
+    <h3>목표 설정</h3>
+    <label>Goal X</label>
+    <input type="number" id="goal-x" value="142.47" step="0.1">
+    <label>Goal Z</label>
+    <input type="number" id="goal-z" value="214.1" step="0.1">
+    <br><br>
+    <button class="btn btn-plan" onclick="planPath()">🗺 경로 계획 (A*)</button>
+    <br><br>
+    <button class="btn btn-clear" onclick="clearPath()">🗑 경로 초기화</button>
+  </div>
+
+  <div class="card">
+    <h3>범례</h3>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot" style="background:#e94560"></div>전차</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#f0a500"></div>목표</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#00d4ff"></div>경로 WP</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ff6b6b"></div>정적 장애물</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ff9f43"></div>동적 장애물</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#2ecc71"></div>출발</div>
+    </div>
+  </div>
+
+  <div class="card" style="flex:1">
+    <h3>로그</h3>
+    <div id="log"></div>
+  </div>
+</div>
+
+<div id="map-container">
+  <canvas id="canvas"></canvas>
+  <div id="status-bar">연결 중...</div>
+  <div id="click-hint">캔버스 클릭 → 목표 위치 설정</div>
+</div>
+
+<script>
+// ── 맵 범위 (path_planner와 동일) ──
+const MAP = { xMin: 40, xMax: 310, zMin: 10, zMax: 310 };
+
+// ── 상태 ──
+let state = {
+  tank: { x: 60, z: 27, heading: 0 },
+  path: [],          // [{x,z}]
+  obstacles: [],     // [{x_min,x_max,z_min,z_max,dynamic}]
+  goal: { x: 142.47, z: 214.1 },
+  wpIndex: 0,
+  dist: 0,
+  err: 0,
+};
+
+// ── Canvas 설정 ──
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+
+function resize() {
+  const c = document.getElementById('map-container');
+  canvas.width  = c.clientWidth;
+  canvas.height = c.clientHeight;
+  draw();
+}
+window.addEventListener('resize', resize);
+
+// world → canvas
+function w2c(x, z) {
+  const px = (x - MAP.xMin) / (MAP.xMax - MAP.xMin) * canvas.width;
+  const py = (1 - (z - MAP.zMin) / (MAP.zMax - MAP.zMin)) * canvas.height;
+  return [px, py];
+}
+// canvas → world
+function c2w(px, py) {
+  const x = px / canvas.width  * (MAP.xMax - MAP.xMin) + MAP.xMin;
+  const z = (1 - py / canvas.height) * (MAP.zMax - MAP.zMin) + MAP.zMin;
+  return { x: +x.toFixed(2), z: +z.toFixed(2) };
+}
+
+// ── 그리기 ──
+function draw() {
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // 격자
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  ctx.lineWidth = 1;
+  const step = 20;
+  for (let x = MAP.xMin; x <= MAP.xMax; x += step) {
+    const [px] = w2c(x, MAP.zMin);
+    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, canvas.height); ctx.stroke();
+  }
+  for (let z = MAP.zMin; z <= MAP.zMax; z += step) {
+    const [, py] = w2c(MAP.xMin, z);
+    ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(canvas.width, py); ctx.stroke();
+  }
+
+  // 장애물
+  state.obstacles.forEach(o => {
+    const [x0, y0] = w2c(o.x_min, o.z_max);
+    const [x1, y1] = w2c(o.x_max, o.z_min);
+    ctx.fillStyle = o.dynamic ? 'rgba(255,159,67,0.5)' : 'rgba(255,107,107,0.5)';
+    ctx.strokeStyle = o.dynamic ? '#ff9f43' : '#ff6b6b';
+    ctx.lineWidth = 1;
+    ctx.fillRect(x0, y0, x1-x0, y1-y0);
+    ctx.strokeRect(x0, y0, x1-x0, y1-y0);
+  });
+
+  // 경로
+  if (state.path.length > 1) {
+    ctx.beginPath();
+    ctx.strokeStyle = '#00d4ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 3]);
+    const [sx, sy] = w2c(state.path[0].x, state.path[0].z);
+    ctx.moveTo(sx, sy);
+    state.path.forEach(wp => {
+      const [px, py] = w2c(wp.x, wp.z);
+      ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // WP 점
+    state.path.forEach((wp, i) => {
+      const [px, py] = w2c(wp.x, wp.z);
+      ctx.beginPath();
+      ctx.arc(px, py, i === state.wpIndex ? 6 : 3, 0, Math.PI * 2);
+      ctx.fillStyle = i === state.wpIndex ? '#ffffff' : '#00d4ff';
+      ctx.fill();
+    });
+  }
+
+  // 출발점
+  {
+    const [px, py] = w2c(60, 27.23);
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI*2);
+    ctx.fillStyle = '#2ecc71'; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '10px monospace';
+    ctx.fillText('START', px+8, py+4);
+  }
+
+  // 목표
+  {
+    const [px, py] = w2c(state.goal.x, state.goal.z);
+    ctx.beginPath(); ctx.arc(px, py, 8, 0, Math.PI*2);
+    ctx.fillStyle = '#f0a500'; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = '10px monospace';
+    ctx.fillText('GOAL', px+10, py+4);
+  }
+
+  // 전차
+  {
+    const [px, py] = w2c(state.tank.x, state.tank.z);
+    const rad = (state.tank.heading - 90) * Math.PI / 180;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(rad);
+    ctx.fillStyle = '#e94560';
+    ctx.fillRect(-8, -12, 16, 24);   // 몸체
+    ctx.fillStyle = '#ff8fa3';
+    ctx.fillRect(-2, -18, 4, 10);    // 포신
+    ctx.restore();
+
+    // 반경 표시
+    ctx.beginPath();
+    ctx.arc(px, py, 5*canvas.width/(MAP.xMax-MAP.xMin), 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(233,69,96,0.3)'; ctx.lineWidth=1; ctx.stroke();
+  }
+}
+
+// ── SSE 연결 ──
+const evtSource = new EventSource('/stream');
+evtSource.onopen = () => setStatus('🟢 연결됨');
+evtSource.onerror = () => setStatus('🔴 연결 끊김');
+
+evtSource.onmessage = e => {
+  const d = JSON.parse(e.data);
+
+  if (d.tank) {
+    state.tank = d.tank;
+    document.getElementById('s-x').textContent    = d.tank.x.toFixed(1);
+    document.getElementById('s-z').textContent    = d.tank.z.toFixed(1);
+    document.getElementById('s-h').textContent    = d.tank.heading.toFixed(1) + '°';
+  }
+  if (d.wp_index !== undefined) {
+    state.wpIndex = d.wp_index;
+    document.getElementById('s-wp').textContent   = d.wp_index;
+  }
+  if (d.dist !== undefined)
+    document.getElementById('s-dist').textContent = d.dist.toFixed(1) + 'm';
+  if (d.err !== undefined)
+    document.getElementById('s-err').textContent  = d.err.toFixed(1) + '°';
+  if (d.path)   state.path      = d.path;
+  if (d.obstacles) state.obstacles = d.obstacles;
+  if (d.log)    addLog(d.log);
+
+  draw();
+};
+
+// ── 클릭으로 목표 설정 ──
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const wc = c2w(e.clientX - rect.left, e.clientY - rect.top);
+  state.goal = wc;
+  document.getElementById('goal-x').value = wc.x;
+  document.getElementById('goal-z').value = wc.z;
+  addLog(`목표 설정: (${wc.x}, ${wc.z})`);
+  draw();
+});
+
+// ── 경로 계획 ──
+function planPath() {
+  const gx = parseFloat(document.getElementById('goal-x').value);
+  const gz = parseFloat(document.getElementById('goal-z').value);
+  state.goal = { x: gx, z: gz };
+  addLog(`A* 경로 계획 요청: 목표 (${gx}, ${gz})`);
+  fetch('/plan_path', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ goal_x: gx, goal_z: gz })
+  }).then(r => r.json()).then(d => {
+    if (d.waypoints) {
+      state.path = d.waypoints;
+      addLog(`✅ 경로 수신: ${d.waypoints.length}개 WP`);
+      draw();
+    } else {
+      addLog('❌ 경로 계획 실패: ' + (d.error || ''));
+    }
+  });
+}
+
+function clearPath() {
+  state.path = [];
+  addLog('경로 초기화');
+  draw();
+}
+
+// ── 유틸 ──
+function setStatus(msg) {
+  document.getElementById('status-bar').textContent = msg;
+}
+function addLog(msg) {
+  const el = document.getElementById('log');
+  el.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+resize();
+addLog('대시보드 시작');
+</script>
+</body>
+</html>

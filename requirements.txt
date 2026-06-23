@@ -1,0 +1,4 @@
+# Runtime dependencies for aim_drive_fire_modes.py and its imported local modules.
+flask
+pillow
+ultralytics
