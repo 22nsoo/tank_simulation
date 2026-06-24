@@ -1044,3 +1044,83 @@ vertical_error = impact_y - target_y
 각 오차의 평균을 계산해 체계적인 pitch/yaw 편향과 무작위 탄 퍼짐을
 구분한다. 이 값들은 장애물 중심 기준 진단값이며, 장애물 표면 반경을
 추정하기 전에는 자동 포각 bias에 직접 누적하지 않는다.
+
+#### 2026-06-24 정적 장애물 포각 제어 속도 튜닝
+
+정적 장애물 검증에서는 표적이 움직이지 않으므로, 포각 제어가 너무 느려서
+조준 안정화까지 오래 걸리는 문제가 더 크게 보인다. 그래서 `R/F` 포각 명령의
+수식은 유지하되, 오차가 큰 구간에서 더 빠르게 목표 포각에 접근하도록
+weight 상한과 오차 스케일을 조정했다.
+
+기존 수식:
+
+```text
+max_pitch_weight = 0.22 if dR/dtheta > 80 else 0.18
+pitch_weight = clamp(abs(pitch_error) / 5.0 × max_pitch_weight,
+                     0.04,
+                     max_pitch_weight)
+```
+
+변경 수식:
+
+```text
+PITCH_CONTROL_ERROR_SCALE_DEG = 4.0
+PITCH_MIN_WEIGHT = 0.045
+PITCH_MAX_WEIGHT_FLAT = 0.22
+PITCH_MAX_WEIGHT_SENSITIVE = 0.28
+PITCH_SENSITIVE_RANGE_DERIVATIVE = 80.0
+
+max_pitch_weight =
+    0.28  if abs(dR/dtheta) > 80
+    0.22  otherwise
+
+pitch_weight = clamp(abs(pitch_error) / 4.0 × max_pitch_weight,
+                     0.045,
+                     max_pitch_weight)
+```
+
+효과:
+
+```text
+큰 포각 오차  → 기존보다 더 빠르게 R/F 회전
+작은 포각 오차 → 최소 weight만 소폭 증가하여 미세 접근 유지
+발사 조건     → 기존 dynamic pitch tolerance 그대로 유지
+```
+
+주의점:
+
+```text
+오버슈팅이 보이면 PITCH_MAX_WEIGHT_SENSITIVE를 0.28 → 0.25로 낮춘다.
+조준이 여전히 느리면 PITCH_CONTROL_ERROR_SCALE_DEG를 4.0 → 3.5로 낮춘다.
+```
+
+#### 2026-06-24 정적 장애물 목표 근처 포각 접근 속도 보정
+
+목표 포각 근처에서 `pitch_error`가 작아질수록 weight가 최소값까지 낮아져
+마지막 접근이 지나치게 느려지는 현상이 있었다. 큰 오차 구간의 최대 속도는
+그대로 두고, 목표 근처 접근 속도만 소폭 올리기 위해 최소 R/F weight를 조정했다.
+
+변경:
+
+```text
+PITCH_MIN_WEIGHT = 0.045 → 0.055
+```
+
+현재 포각 제어 수식:
+
+```text
+pitch_weight = clamp(abs(pitch_error) / 4.0 × max_pitch_weight,
+                     0.055,
+                     max_pitch_weight)
+```
+
+의도:
+
+```text
+큰 오차 구간     → 이전 튜닝과 동일
+목표 근처 구간   → 너무 느리게 붙는 문제 완화
+오버슈팅 위험    → 최대 weight는 그대로라 제한적
+```
+
+만약 목표 근처에서 지나쳤다가 되돌아오는 현상이 다시 보이면
+`PITCH_MIN_WEIGHT`를 `0.055 → 0.050`으로 낮춘다.

@@ -17,9 +17,11 @@ INITIAL_TURN_SECONDS = (
 ROTATION_SETTLE_SECONDS = 0.5
 
 DRIVE_WEIGHT = 0.20
-X_HALF_SPAN_METERS = 10.0
+ALIGN_DRIVE_WEIGHT = 0.08
+X_HALF_SPAN_METERS = 20.0
 X_DIRECTION_DETECT_METERS = 0.25
 X_AXIS_HEADING_TOLERANCE_DEG = 0.8
+X_AXIS_DRIVE_HEADING_TOLERANCE_DEG = 6.0
 X_AXIS_STEER_KP = 0.015
 X_AXIS_STEER_MAX_WEIGHT = 0.20
 REVERSAL_STOP_SECONDS = 0.7
@@ -179,8 +181,12 @@ def enemy_movement_action(position=None, now=None):
         if not reversing:
             update_heading_estimate(position, now, drive_command)
 
-        if estimated_body_yaw is not None and forward_x_sign is not None:
-            desired_body_yaw = 90.0 if forward_x_sign > 0 else -90.0
+        if estimated_body_yaw is not None:
+            desired_body_yaw = (
+                90.0
+                if forward_x_sign is None or forward_x_sign > 0
+                else -90.0
+            )
             x_axis_heading_error = normalize_angle(
                 desired_body_yaw - estimated_body_yaw
             )
@@ -198,6 +204,11 @@ def enemy_movement_action(position=None, now=None):
                 X_AXIS_STEER_MAX_WEIGHT,
                 max(0.03, abs(x_axis_heading_error) * X_AXIS_STEER_KP),
             )
+
+            if abs(x_axis_heading_error) > X_AXIS_DRIVE_HEADING_TOLERANCE_DEG:
+                move_ws_command = drive_command
+                move_ws_weight = ALIGN_DRIVE_WEIGHT
+                movement_phase = "x_axis_align_while_slow_drive"
         else:
             move_ad_command = "STOP"
             move_ad_weight = 0.0
@@ -218,6 +229,7 @@ def enemy_movement_action(position=None, now=None):
             "movementPhase": movement_phase,
             "phaseElapsed": round(phase_elapsed, 3),
             "driveWeight": DRIVE_WEIGHT,
+            "alignDriveWeight": ALIGN_DRIVE_WEIGHT,
             "initialRotationDeg": INITIAL_ROTATION_DEG,
             "initialTurnWeight": INITIAL_TURN_WEIGHT,
             "initialTurnSeconds": round(INITIAL_TURN_SECONDS, 3),
@@ -235,6 +247,7 @@ def enemy_movement_action(position=None, now=None):
                 if x_axis_heading_error is not None
                 else None
             ),
+            "xAxisDriveHeadingTolerance": X_AXIS_DRIVE_HEADING_TOLERANCE_DEG,
             "zDeviation": (
                 round(position_z - movement_center_z, 3)
                 if position_z is not None and movement_center_z is not None

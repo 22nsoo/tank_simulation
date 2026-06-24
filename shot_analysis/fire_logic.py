@@ -132,6 +132,15 @@ PITCH_TUNE_GAIN = 0.35
 MAX_BIAS_UPDATE_DEG = 2.0
 RANGE_ERROR_TOLERANCE = 3.0
 
+# Static-obstacle pitch control tuning.
+# Larger errors should move the gun faster, while small errors still slow down
+# before entering the fire tolerance band.
+PITCH_CONTROL_ERROR_SCALE_DEG = 4.0
+PITCH_MIN_WEIGHT = 0.055
+PITCH_MAX_WEIGHT_FLAT = 0.22
+PITCH_MAX_WEIGHT_SENSITIVE = 0.28
+PITCH_SENSITIVE_RANGE_DERIVATIVE = 80.0
+
 MIN_PITCH_DEG = -10.0
 MAX_PITCH_DEG = 35.0
 
@@ -1155,11 +1164,15 @@ def make_aim_action(info):
             )
         )
 
-        max_pitch_weight = 0.22 if dR_dtheta > 80 else 0.18
+        max_pitch_weight = (
+            PITCH_MAX_WEIGHT_SENSITIVE
+            if dR_dtheta > PITCH_SENSITIVE_RANGE_DERIVATIVE
+            else PITCH_MAX_WEIGHT_FLAT
+        )
 
         pitch_weight = clamp(
-            abs_pitch_error / 5.0 * max_pitch_weight,
-            0.04,
+            abs_pitch_error / PITCH_CONTROL_ERROR_SCALE_DEG * max_pitch_weight,
+            PITCH_MIN_WEIGHT,
             max_pitch_weight
         )
 

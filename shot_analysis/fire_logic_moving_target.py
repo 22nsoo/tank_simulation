@@ -20,6 +20,8 @@ latest_obstacles = []
 enemy_motion_samples = deque(maxlen=12)
 enemy_velocity_x = 0.0
 enemy_velocity_z = 0.0
+enemy_accel_x = 0.0
+enemy_accel_z = 0.0
 enemy_motion_sample_count = 0
 enemy_motion_last_position = None
 enemy_motion_last_time = None
@@ -86,6 +88,18 @@ TEST_SINGLE_SHOT_PER_SPAWN = False
 shot_fired_for_current_spawn = False
 SPAWN_FIRE_ARM_DELAY_SECONDS = 1.5
 AIM_STABLE_SECONDS = 0.5
+MOVING_AIM_STABLE_SECONDS = 0.12
+MOVING_TURRET_FIRE_TOLERANCE_DEG = 2.5
+MOVING_BODY_FIRE_TOLERANCE_DEG = 14.0
+MOVING_PITCH_TOLERANCE_MULTIPLIER = 1.25
+MOVING_LEAD_BOOST_FULL_DISTANCE_M = 4.0
+MOVING_YAW_MAX_WEIGHT_BOOST = 0.65
+MOVING_PITCH_MAX_WEIGHT_BOOST = 0.30
+MOVING_PREDICTIVE_FIRE_LOOKAHEAD_SECONDS = 0.18
+MOVING_PREDICTIVE_FIRE_STABLE_SECONDS = 0.04
+MOVING_PREFIRE_TURRET_WINDOW_DEG = 6.0
+MOVING_PREFIRE_PITCH_TOLERANCE_MULTIPLIER = 1.8
+MOVING_MIN_YAW_CLOSING_RATE_DEG_S = 2.5
 spawn_initialized_at = 0.0
 aim_ready_since = None
 
@@ -101,12 +115,16 @@ BODY_FIRE_TOLERANCE_DEG = 10.0
 
 # Moving-target lead prediction.
 ENEMY_VELOCITY_EMA_ALPHA = 0.35
-ENEMY_MAX_VALID_SPEED_MPS = 25.0
+ENEMY_ACCEL_EMA_ALPHA = 0.25
+ENEMY_MAX_VALID_SPEED_MPS = 8.0
+ENEMY_MAX_VALID_ACCEL_MPS2 = 8.0
 ENEMY_MOTION_MIN_SAMPLES = 3
 FIRE_SYSTEM_DELAY_SECONDS = 0.10
-FLIGHT_TIME_CORRECTION_FACTOR = 1.096
+FLIGHT_TIME_CORRECTION_FACTOR = 1.06
 MAX_FLIGHT_TIME_SECONDS = 4.0
 MAX_LEAD_DISTANCE_M = 35.0
+MAX_ACCEL_LEAD_DISTANCE_M = 8.0
+INTERCEPT_SOLVER_ITERATIONS = 8
 MAX_CONTROL_PREDICTION_SECONDS = 15.0
 CONTROL_TIME_SAFETY_FACTOR = 1.20
 PITCH_SPEED_PER_WEIGHT = 4.562
@@ -120,6 +138,7 @@ previous_yaw_target_index = None
 pending_shots = deque()
 shot_id_counter = 0
 MAX_MOVING_TARGET_SHOTS = 15
+IGNORE_MOVING_TARGET_HEALTH_FOR_SHOT_LIMIT_TEST = True
 moving_target_shots_fired = 0
 enemy_motion_reversal_hold_until = 0.0
 
@@ -158,6 +177,15 @@ IMPACT_BIAS_TUNING_ENABLED = False
 PITCH_TUNE_GAIN = 0.35
 MAX_BIAS_UPDATE_DEG = 2.0
 RANGE_ERROR_TOLERANCE = 3.0
+
+# Moving-target pitch control tuning.
+# Keep the same formula as the static-obstacle tuning so the measured pitch
+# response and the prediction model use one consistent R/F command curve.
+PITCH_CONTROL_ERROR_SCALE_DEG = 4.0
+PITCH_MIN_WEIGHT = 0.055
+PITCH_MAX_WEIGHT_FLAT = 0.22
+PITCH_MAX_WEIGHT_SENSITIVE = 0.28
+PITCH_SENSITIVE_RANGE_DERIVATIVE = 80.0
 
 MIN_PITCH_DEG = -10.0
 MAX_PITCH_DEG = 35.0
@@ -218,9 +246,15 @@ def init_control_log():
             "enemy_velocity_x",
             "enemy_velocity_z",
             "enemy_speed",
+            "enemy_accel_x",
+            "enemy_accel_z",
+            "enemy_accel",
+            "intercept_solver",
             "predicted_control_time",
             "predicted_yaw_control_time",
             "predicted_pitch_control_time",
+            "target_angle_rate_deg_s",
+            "yaw_closing_rate_deg_s",
             "predicted_flight_time",
             "flight_time_correction_factor",
             "predicted_total_intercept_time",
@@ -235,6 +269,7 @@ def init_control_log():
             "turret_error_rate",
             "turret_pd_effort_raw",
             "turret_pd_effort",
+            "predicted_turret_yaw_rate",
             "body_equivalent_turret_weight",
             "turret_qe_command",
             "turret_qe_weight",
@@ -242,9 +277,16 @@ def init_control_log():
             "body_signed_effort",
             "predicted_body_yaw_rate",
             "body_coarse_turn_enabled",
+            "pitch_signed_effort",
+            "predicted_pitch_rate",
             "move_ad_command",
             "move_ad_weight",
             "aim_aligned",
+            "predictive_aim_aligned",
+            "fire_alignment_ready",
+            "predictive_fire_lookahead_seconds",
+            "predicted_turret_error_at_fire",
+            "predicted_pitch_error_at_fire",
             "spawn_arm_ready",
             "aim_stable_ready",
             "fire",
@@ -280,9 +322,15 @@ def log_control_action(info, action):
             moving_target.get("enemy_velocity_x"),
             moving_target.get("enemy_velocity_z"),
             moving_target.get("enemy_speed"),
+            moving_target.get("enemy_accel_x"),
+            moving_target.get("enemy_accel_z"),
+            moving_target.get("enemy_accel"),
+            moving_target.get("intercept_solver"),
             moving_target.get("predicted_control_time"),
             moving_target.get("predicted_yaw_control_time"),
             moving_target.get("predicted_pitch_control_time"),
+            moving_target.get("target_angle_rate_deg_s"),
+            moving_target.get("yaw_closing_rate_deg_s"),
             moving_target.get("predicted_flight_time"),
             moving_target.get("flight_time_correction_factor"),
             moving_target.get("predicted_total_intercept_time"),
@@ -297,6 +345,7 @@ def log_control_action(info, action):
             debug.get("turret_error_rate"),
             debug.get("turret_pd_effort_raw"),
             debug.get("turret_pd_effort"),
+            debug.get("predicted_turret_yaw_rate"),
             debug.get("body_equivalent_turret_weight"),
             turret_qe.get("command"),
             turret_qe.get("weight"),
@@ -304,9 +353,16 @@ def log_control_action(info, action):
             debug.get("body_signed_effort"),
             debug.get("predicted_body_yaw_rate"),
             debug.get("body_coarse_turn_enabled"),
+            debug.get("pitch_signed_effort"),
+            debug.get("predicted_pitch_rate"),
             move_ad.get("command"),
             move_ad.get("weight"),
             debug.get("aim_aligned"),
+            debug.get("predictive_aim_aligned"),
+            debug.get("fire_alignment_ready"),
+            debug.get("predictive_fire_lookahead_seconds"),
+            debug.get("predicted_turret_error_at_fire"),
+            debug.get("predicted_pitch_error_at_fire"),
             debug.get("spawn_arm_ready"),
             debug.get("aim_stable_ready"),
             action.get("fire", False),
@@ -319,6 +375,22 @@ def log_control_action(info, action):
 
 def clamp(value, min_value, max_value):
     return max(min_value, min(max_value, value))
+
+
+def moving_lead_boost_factor(moving_target_debug):
+    if not isinstance(moving_target_debug, dict):
+        return 0.0
+
+    try:
+        lead_distance = float(moving_target_debug.get("lead_distance", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+    return clamp(
+        lead_distance / MOVING_LEAD_BOOST_FULL_DISTANCE_M,
+        0.0,
+        1.0,
+    )
 
 
 def normalize_angle(angle):
@@ -355,6 +427,7 @@ def safe_get_pos(pos, key, default=None):
 
 def reset_enemy_motion_tracking():
     global enemy_velocity_x, enemy_velocity_z
+    global enemy_accel_x, enemy_accel_z
     global enemy_motion_sample_count
     global enemy_motion_last_position, enemy_motion_last_time
     global enemy_motion_reversal_hold_until
@@ -362,6 +435,8 @@ def reset_enemy_motion_tracking():
     enemy_motion_samples.clear()
     enemy_velocity_x = 0.0
     enemy_velocity_z = 0.0
+    enemy_accel_x = 0.0
+    enemy_accel_z = 0.0
     enemy_motion_sample_count = 0
     enemy_motion_last_position = None
     enemy_motion_last_time = None
@@ -370,6 +445,7 @@ def reset_enemy_motion_tracking():
 
 def update_enemy_motion_tracking(info, sample_time=None):
     global enemy_velocity_x, enemy_velocity_z
+    global enemy_accel_x, enemy_accel_z
     global enemy_motion_sample_count
     global enemy_motion_last_position, enemy_motion_last_time
     global enemy_motion_reversal_hold_until
@@ -402,6 +478,8 @@ def update_enemy_motion_tracking(info, sample_time=None):
             raw_speed = math.hypot(raw_vx, raw_vz)
 
             if raw_speed <= ENEMY_MAX_VALID_SPEED_MPS:
+                previous_velocity_x = enemy_velocity_x
+                previous_velocity_z = enemy_velocity_z
                 velocity_dot = (
                     raw_vx * enemy_velocity_x
                     + raw_vz * enemy_velocity_z
@@ -420,6 +498,8 @@ def update_enemy_motion_tracking(info, sample_time=None):
                 if direction_reversed:
                     enemy_velocity_x = 0.0
                     enemy_velocity_z = 0.0
+                    enemy_accel_x = 0.0
+                    enemy_accel_z = 0.0
                     enemy_motion_sample_count = 0
                     enemy_motion_samples.clear()
                     enemy_motion_reversal_hold_until = (
@@ -435,6 +515,25 @@ def update_enemy_motion_tracking(info, sample_time=None):
                     alpha * raw_vz
                     + (1.0 - alpha) * enemy_velocity_z
                 )
+
+                raw_ax = (raw_vx - previous_velocity_x) / dt
+                raw_az = (raw_vz - previous_velocity_z) / dt
+                raw_accel = math.hypot(raw_ax, raw_az)
+
+                if raw_accel <= ENEMY_MAX_VALID_ACCEL_MPS2:
+                    accel_alpha = ENEMY_ACCEL_EMA_ALPHA
+                    enemy_accel_x = (
+                        accel_alpha * raw_ax
+                        + (1.0 - accel_alpha) * enemy_accel_x
+                    )
+                    enemy_accel_z = (
+                        accel_alpha * raw_az
+                        + (1.0 - accel_alpha) * enemy_accel_z
+                    )
+                else:
+                    enemy_accel_x = 0.0
+                    enemy_accel_z = 0.0
+
                 enemy_motion_sample_count += 1
                 enemy_motion_samples.append({
                     "time": now,
@@ -447,6 +546,8 @@ def update_enemy_motion_tracking(info, sample_time=None):
                 # A large jump is a respawn/teleport, not target velocity.
                 enemy_velocity_x = 0.0
                 enemy_velocity_z = 0.0
+                enemy_accel_x = 0.0
+                enemy_accel_z = 0.0
                 enemy_motion_sample_count = 0
                 enemy_motion_samples.clear()
 
@@ -467,6 +568,7 @@ def estimate_pitch_control_time(
     desired_pitch,
     theta_for_gain,
     muzzle_speed,
+    lead_boost=0.0,
 ):
     pitch = float(current_pitch)
     elapsed = 0.0
@@ -478,7 +580,14 @@ def estimate_pitch_control_time(
             muzzle_speed=muzzle_speed,
         )
     )
-    max_pitch_weight = 0.22 if dR_dtheta > 80 else 0.18
+    max_pitch_weight = (
+        PITCH_MAX_WEIGHT_SENSITIVE
+        if dR_dtheta > PITCH_SENSITIVE_RANGE_DERIVATIVE
+        else PITCH_MAX_WEIGHT_FLAT
+    )
+    max_pitch_weight *= (
+        1.0 + MOVING_PITCH_MAX_WEIGHT_BOOST * clamp(lead_boost, 0.0, 1.0)
+    )
 
     while elapsed < MAX_CONTROL_PREDICTION_SECONDS:
         error = desired_pitch - pitch
@@ -486,8 +595,8 @@ def estimate_pitch_control_time(
             break
 
         weight = clamp(
-            abs(error) / 5.0 * max_pitch_weight,
-            0.04,
+            abs(error) / PITCH_CONTROL_ERROR_SCALE_DEG * max_pitch_weight,
+            PITCH_MIN_WEIGHT,
             max_pitch_weight,
         )
         pitch_rate = PITCH_SPEED_PER_WEIGHT * weight
@@ -497,7 +606,13 @@ def estimate_pitch_control_time(
     return min(elapsed, MAX_CONTROL_PREDICTION_SECONDS)
 
 
-def estimate_aim_control_time(info, predicted_enemy_pos):
+def estimate_aim_control_time(
+    info,
+    predicted_enemy_pos,
+    lead_distance=0.0,
+    target_velocity_x=0.0,
+    target_velocity_z=0.0,
+):
     player_pos = info.get("playerPos", {})
 
     try:
@@ -508,21 +623,41 @@ def estimate_aim_control_time(info, predicted_enemy_pos):
             player_pos,
             predicted_enemy_pos,
         )
+        dx = float(predicted_enemy_pos["x"]) - float(player_pos["x"])
+        dz = float(predicted_enemy_pos["z"]) - float(player_pos["z"])
     except (KeyError, TypeError, ValueError):
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0
 
     turret_error = normalize_angle(target_yaw - current_turret_yaw)
     body_error = normalize_angle(target_yaw - current_body_yaw)
+    range_sq = max(dx * dx + dz * dz, 1e-6)
+    target_angle_rate_deg_s = math.degrees(
+        (dz * float(target_velocity_x) - dx * float(target_velocity_z))
+        / range_sq
+    )
     turret_weight = max_turret_yaw_weight_for_distance(distance)
+    lead_boost = clamp(
+        lead_distance / MOVING_LEAD_BOOST_FULL_DISTANCE_M,
+        0.0,
+        1.0,
+    )
+    turret_weight *= (
+        1.0 + MOVING_YAW_MAX_WEIGHT_BOOST * lead_boost
+    )
     body_weight = min(0.35, abs(BODY_YAW_KP * body_error))
 
     yaw_speed = (
         TURRET_YAW_SPEED_PER_WEIGHT * turret_weight
         + BODY_YAW_SPEED_PER_WEIGHT * body_weight
     )
+    turret_error_sign = 1.0 if turret_error >= 0.0 else -1.0
+    yaw_closing_rate = max(
+        MOVING_MIN_YAW_CLOSING_RATE_DEG_S,
+        yaw_speed - turret_error_sign * target_angle_rate_deg_s,
+    )
     yaw_time = (
-        abs(turret_error) / yaw_speed
-        if yaw_speed > 1e-6
+        abs(turret_error) / yaw_closing_rate
+        if yaw_closing_rate > 1e-6
         else MAX_CONTROL_PREDICTION_SECONDS
     )
 
@@ -540,6 +675,7 @@ def estimate_aim_control_time(info, predicted_enemy_pos):
         muzzle_speed=float(
             ballistic.get("muzzle_speed", MUZZLE_SPEED)
         ),
+        lead_boost=lead_boost,
     )
 
     control_time = clamp(
@@ -547,7 +683,13 @@ def estimate_aim_control_time(info, predicted_enemy_pos):
         0.0,
         MAX_CONTROL_PREDICTION_SECONDS,
     )
-    return control_time, yaw_time, pitch_time
+    return (
+        control_time,
+        yaw_time,
+        pitch_time,
+        target_angle_rate_deg_s,
+        yaw_closing_rate,
+    )
 
 
 def predict_enemy_intercept(info, observed_enemy_pos):
@@ -576,16 +718,24 @@ def predict_enemy_intercept(info, observed_enemy_pos):
     )
     vx = enemy_velocity_x if motion_ready else 0.0
     vz = enemy_velocity_z if motion_ready else 0.0
+    ax = enemy_accel_x if motion_ready else 0.0
+    az = enemy_accel_z if motion_ready else 0.0
     predicted_x = ex
     predicted_z = ez
     flight_time = 0.0
     control_time = 0.0
     yaw_control_time = 0.0
     pitch_control_time = 0.0
+    target_angle_rate_deg_s = 0.0
+    yaw_closing_rate_deg_s = 0.0
     total_intercept_time = 0.0
+    estimated_lead_distance = 0.0
 
-    # Lead changes aim error, control time, range, and flight time.
-    for _ in range(6):
+    # Paper-style iterative intercept solver:
+    # future target position = p + v*t + 0.5*a*t^2.
+    # The future position changes range, flight time, and control delay, so
+    # iterate until the implied intercept time settles.
+    for _ in range(INTERCEPT_SOLVER_ITERATIONS):
         predicted_position = {
             "x": predicted_x,
             "y": ey,
@@ -595,7 +745,15 @@ def predict_enemy_intercept(info, observed_enemy_pos):
             control_time,
             yaw_control_time,
             pitch_control_time,
-        ) = estimate_aim_control_time(info, predicted_position)
+            target_angle_rate_deg_s,
+            yaw_closing_rate_deg_s,
+        ) = estimate_aim_control_time(
+            info,
+            predicted_position,
+            lead_distance=estimated_lead_distance,
+            target_velocity_x=vx,
+            target_velocity_z=vz,
+        )
 
         horizontal_range = math.hypot(predicted_x - px, predicted_z - pz)
         muzzle_speed = effective_muzzle_speed(horizontal_range)
@@ -617,14 +775,26 @@ def predict_enemy_intercept(info, observed_enemy_pos):
         )
         total_intercept_time = (
             control_time
-            + AIM_STABLE_SECONDS
+            + MOVING_AIM_STABLE_SECONDS
             + FIRE_SYSTEM_DELAY_SECONDS
             + flight_time
         )
         lead_time = total_intercept_time
-        lead_dx = vx * lead_time
-        lead_dz = vz * lead_time
+        velocity_lead_dx = vx * lead_time
+        velocity_lead_dz = vz * lead_time
+        accel_lead_dx = 0.5 * ax * lead_time * lead_time
+        accel_lead_dz = 0.5 * az * lead_time * lead_time
+        accel_lead_distance = math.hypot(accel_lead_dx, accel_lead_dz)
+
+        if accel_lead_distance > MAX_ACCEL_LEAD_DISTANCE_M:
+            scale = MAX_ACCEL_LEAD_DISTANCE_M / accel_lead_distance
+            accel_lead_dx *= scale
+            accel_lead_dz *= scale
+
+        lead_dx = velocity_lead_dx + accel_lead_dx
+        lead_dz = velocity_lead_dz + accel_lead_dz
         lead_distance = math.hypot(lead_dx, lead_dz)
+        estimated_lead_distance = lead_distance
 
         if lead_distance > MAX_LEAD_DISTANCE_M:
             scale = MAX_LEAD_DISTANCE_M / lead_distance
@@ -635,6 +805,7 @@ def predict_enemy_intercept(info, observed_enemy_pos):
         predicted_z = ez + lead_dz
 
     speed = math.hypot(vx, vz)
+    accel = math.hypot(ax, az)
     lead_distance = math.hypot(predicted_x - ex, predicted_z - ez)
 
     return {
@@ -651,9 +822,14 @@ def predict_enemy_intercept(info, observed_enemy_pos):
         "enemy_velocity_x": round(vx, 4),
         "enemy_velocity_z": round(vz, 4),
         "enemy_speed": round(speed, 4),
+        "enemy_accel_x": round(ax, 4),
+        "enemy_accel_z": round(az, 4),
+        "enemy_accel": round(accel, 4),
         "predicted_control_time": round(control_time, 4),
         "predicted_yaw_control_time": round(yaw_control_time, 4),
         "predicted_pitch_control_time": round(pitch_control_time, 4),
+        "target_angle_rate_deg_s": round(target_angle_rate_deg_s, 4),
+        "yaw_closing_rate_deg_s": round(yaw_closing_rate_deg_s, 4),
         "predicted_flight_time": round(flight_time, 4),
         "flight_time_correction_factor": (
             FLIGHT_TIME_CORRECTION_FACTOR
@@ -663,6 +839,9 @@ def predict_enemy_intercept(info, observed_enemy_pos):
             4,
         ),
         "lead_distance": round(lead_distance, 4),
+        "intercept_solver": "iterative_p_vt_half_at2",
+        "intercept_solver_iterations": INTERCEPT_SOLVER_ITERATIONS,
+        "max_accel_lead_distance": MAX_ACCEL_LEAD_DISTANCE_M,
         "observed_enemy_x": ex,
         "observed_enemy_y": ey,
         "observed_enemy_z": ez,
@@ -1002,10 +1181,16 @@ def init_shot_log():
             "enemy_velocity_x_fire",
             "enemy_velocity_z_fire",
             "enemy_speed_fire",
+            "enemy_accel_x_fire",
+            "enemy_accel_z_fire",
+            "enemy_accel_fire",
+            "intercept_solver_fire",
             "reversal_hold_remaining_fire",
             "predicted_control_time_fire",
             "predicted_yaw_control_time_fire",
             "predicted_pitch_control_time_fire",
+            "target_angle_rate_deg_s_fire",
+            "yaw_closing_rate_deg_s_fire",
             "predicted_flight_time_fire",
             "flight_time_correction_factor_fire",
             "predicted_total_intercept_time_fire",
@@ -1023,6 +1208,13 @@ def init_shot_log():
             "desired_pitch_fire",
             "pitch_error_fire",
             "pitch_fire_tolerance",
+            "predictive_aim_aligned_fire",
+            "fire_alignment_ready_fire",
+            "predictive_fire_lookahead_seconds_fire",
+            "predicted_turret_yaw_rate_fire",
+            "predicted_turret_error_at_fire",
+            "predicted_pitch_rate_fire",
+            "predicted_pitch_error_at_fire",
 
             "ballistic_R_fire",
             "ballistic_dy_fire",
@@ -1106,6 +1298,10 @@ def save_pending_shot(info, debug, action):
         "enemy_velocity_x": moving_target.get("enemy_velocity_x"),
         "enemy_velocity_z": moving_target.get("enemy_velocity_z"),
         "enemy_speed": moving_target.get("enemy_speed"),
+        "enemy_accel_x": moving_target.get("enemy_accel_x"),
+        "enemy_accel_z": moving_target.get("enemy_accel_z"),
+        "enemy_accel": moving_target.get("enemy_accel"),
+        "intercept_solver": moving_target.get("intercept_solver"),
         "reversal_hold_remaining": moving_target.get(
             "reversal_hold_remaining"
         ),
@@ -1117,6 +1313,12 @@ def save_pending_shot(info, debug, action):
         ),
         "predicted_pitch_control_time": moving_target.get(
             "predicted_pitch_control_time"
+        ),
+        "target_angle_rate_deg_s": moving_target.get(
+            "target_angle_rate_deg_s"
+        ),
+        "yaw_closing_rate_deg_s": moving_target.get(
+            "yaw_closing_rate_deg_s"
         ),
         "predicted_flight_time": moving_target.get("predicted_flight_time"),
         "flight_time_correction_factor": moving_target.get(
@@ -1139,6 +1341,19 @@ def save_pending_shot(info, debug, action):
         "desired_pitch": debug.get("desired_pitch"),
         "pitch_error": debug.get("pitch_error"),
         "pitch_fire_tolerance": debug.get("pitch_fire_tolerance"),
+        "predictive_aim_aligned": debug.get("predictive_aim_aligned"),
+        "fire_alignment_ready": debug.get("fire_alignment_ready"),
+        "predictive_fire_lookahead_seconds": debug.get(
+            "predictive_fire_lookahead_seconds"
+        ),
+        "predicted_turret_yaw_rate": debug.get("predicted_turret_yaw_rate"),
+        "predicted_turret_error_at_fire": debug.get(
+            "predicted_turret_error_at_fire"
+        ),
+        "predicted_pitch_rate": debug.get("predicted_pitch_rate"),
+        "predicted_pitch_error_at_fire": debug.get(
+            "predicted_pitch_error_at_fire"
+        ),
 
         "ballistic_R": ballistic.get("ballistic_R"),
         "ballistic_dy": ballistic.get("ballistic_dy"),
@@ -1325,10 +1540,16 @@ def log_bullet_impact(impact_data):
             shot.get("enemy_velocity_x"),
             shot.get("enemy_velocity_z"),
             shot.get("enemy_speed"),
+            shot.get("enemy_accel_x"),
+            shot.get("enemy_accel_z"),
+            shot.get("enemy_accel"),
+            shot.get("intercept_solver"),
             shot.get("reversal_hold_remaining"),
             shot.get("predicted_control_time"),
             shot.get("predicted_yaw_control_time"),
             shot.get("predicted_pitch_control_time"),
+            shot.get("target_angle_rate_deg_s"),
+            shot.get("yaw_closing_rate_deg_s"),
             shot.get("predicted_flight_time"),
             shot.get("flight_time_correction_factor"),
             shot.get("predicted_total_intercept_time"),
@@ -1346,6 +1567,13 @@ def log_bullet_impact(impact_data):
             shot.get("desired_pitch"),
             shot.get("pitch_error"),
             shot.get("pitch_fire_tolerance"),
+            shot.get("predictive_aim_aligned"),
+            shot.get("fire_alignment_ready"),
+            shot.get("predictive_fire_lookahead_seconds"),
+            shot.get("predicted_turret_yaw_rate"),
+            shot.get("predicted_turret_error_at_fire"),
+            shot.get("predicted_pitch_rate"),
+            shot.get("predicted_pitch_error_at_fire"),
 
             shot.get("ballistic_R"),
             shot.get("ballistic_dy"),
@@ -1497,7 +1725,12 @@ def make_aim_action(info):
 
     enemy_health = float(info.get("enemyHealth", 100.0))
 
-    if enemy_health <= 0:
+    ignore_enemy_health_for_test = (
+        IGNORE_MOVING_TARGET_HEALTH_FOR_SHOT_LIMIT_TEST
+        and info.get("targetType") == "moving_enemy"
+    )
+
+    if enemy_health <= 0 and not ignore_enemy_health_for_test:
         action["debug"] = {"reason": "enemy dead", "enemyHealth": enemy_health}
         return action
 
@@ -1554,6 +1787,7 @@ def make_aim_action(info):
     predicted_body_yaw_rate = (
         BODY_YAW_SPEED_PER_WEIGHT * body_signed_effort
     )
+    predicted_turret_yaw_rate = 0.0
 
     # --------------------------------------------------------
     # 포탑 yaw PD 제어
@@ -1584,6 +1818,15 @@ def make_aim_action(info):
     else:
         max_turret_weight = 0.32
 
+    lead_boost = moving_lead_boost_factor(moving_target_debug)
+    yaw_max_weight_multiplier = 1.0
+
+    if info.get("targetType") == "moving_enemy":
+        yaw_max_weight_multiplier += (
+            MOVING_YAW_MAX_WEIGHT_BOOST * lead_boost
+        )
+        max_turret_weight *= yaw_max_weight_multiplier
+
     turret_pd_effort_raw = (
         TURRET_YAW_KP * turret_error
         + TURRET_YAW_KD * turret_error_rate
@@ -1597,6 +1840,10 @@ def make_aim_action(info):
         turret_pd_effort_raw - body_equivalent_turret_weight,
         -max_turret_weight,
         max_turret_weight,
+    )
+    predicted_turret_yaw_rate = (
+        TURRET_YAW_SPEED_PER_WEIGHT * turret_pd_effort
+        + predicted_body_yaw_rate
     )
 
     if (
@@ -1615,6 +1862,9 @@ def make_aim_action(info):
     # --------------------------------------------------------
     # 포신 pitch 제어
     # --------------------------------------------------------
+    pitch_signed_effort = 0.0
+    predicted_pitch_rate = 0.0
+
     if abs_pitch_error > 0.2:
         theta_for_gain = ballistic_debug.get("theta_with_bias_deg", abs(desired_pitch))
         calibrated_speed = float(
@@ -1628,13 +1878,27 @@ def make_aim_action(info):
             )
         )
 
-        max_pitch_weight = 0.22 if dR_dtheta > 80 else 0.18
+        max_pitch_weight = (
+            PITCH_MAX_WEIGHT_SENSITIVE
+            if dR_dtheta > PITCH_SENSITIVE_RANGE_DERIVATIVE
+            else PITCH_MAX_WEIGHT_FLAT
+        )
+
+        pitch_max_weight_multiplier = 1.0
+
+        if info.get("targetType") == "moving_enemy":
+            pitch_max_weight_multiplier += (
+                MOVING_PITCH_MAX_WEIGHT_BOOST * lead_boost
+            )
+            max_pitch_weight *= pitch_max_weight_multiplier
 
         pitch_weight = clamp(
-            abs_pitch_error / 5.0 * max_pitch_weight,
-            0.04,
+            abs_pitch_error / PITCH_CONTROL_ERROR_SCALE_DEG * max_pitch_weight,
+            PITCH_MIN_WEIGHT,
             max_pitch_weight
         )
+        pitch_signed_effort = math.copysign(pitch_weight, pitch_error)
+        predicted_pitch_rate = PITCH_SPEED_PER_WEIGHT * pitch_signed_effort
 
         action["turretRF"] = {
             "command": "R" if pitch_error > 0 else "F",
@@ -1669,14 +1933,65 @@ def make_aim_action(info):
         ),
     )
 
-    aim_aligned = (
-        20 < distance < 200
-        and abs_body_error < BODY_FIRE_TOLERANCE_DEG
-        and abs_turret_error < 1.5
-        and abs_pitch_error < pitch_tol
+    is_moving_target = info.get("targetType") == "moving_enemy"
+    turret_fire_tolerance = (
+        MOVING_TURRET_FIRE_TOLERANCE_DEG
+        if is_moving_target
+        else 1.5
+    )
+    body_fire_tolerance = (
+        MOVING_BODY_FIRE_TOLERANCE_DEG
+        if is_moving_target
+        else BODY_FIRE_TOLERANCE_DEG
+    )
+    effective_pitch_tol = (
+        pitch_tol * MOVING_PITCH_TOLERANCE_MULTIPLIER
+        if is_moving_target
+        else pitch_tol
+    )
+    required_aim_stable_seconds = (
+        MOVING_AIM_STABLE_SECONDS
+        if is_moving_target
+        else AIM_STABLE_SECONDS
     )
 
-    if aim_aligned:
+    aim_aligned = (
+        20 < distance < 200
+        and abs_body_error < body_fire_tolerance
+        and abs_turret_error < turret_fire_tolerance
+        and abs_pitch_error < effective_pitch_tol
+    )
+    predictive_lookahead = (
+        MOVING_PREDICTIVE_FIRE_LOOKAHEAD_SECONDS
+        if is_moving_target
+        else 0.0
+    )
+    predicted_turret_yaw_at_fire = (
+        player_turret_yaw
+        + predicted_turret_yaw_rate * predictive_lookahead
+    )
+    predicted_pitch_at_fire = (
+        player_turret_pitch
+        + predicted_pitch_rate * predictive_lookahead
+    )
+    predicted_turret_error_at_fire = normalize_angle(
+        target_world_angle - predicted_turret_yaw_at_fire
+    )
+    predicted_pitch_error_at_fire = (
+        desired_pitch - predicted_pitch_at_fire
+    )
+    predictive_aim_aligned = (
+        is_moving_target
+        and 20 < distance < 200
+        and abs_body_error < body_fire_tolerance
+        and abs_turret_error < MOVING_PREFIRE_TURRET_WINDOW_DEG
+        and abs(predicted_turret_error_at_fire) < turret_fire_tolerance
+        and abs(predicted_pitch_error_at_fire)
+        < pitch_tol * MOVING_PREFIRE_PITCH_TOLERANCE_MULTIPLIER
+    )
+    fire_alignment_ready = aim_aligned or predictive_aim_aligned
+
+    if fire_alignment_ready:
         if aim_ready_since is None:
             aim_ready_since = now
     else:
@@ -1688,11 +2003,15 @@ def make_aim_action(info):
 
     aim_stable_ready = (
         aim_ready_since is not None
-        and now - aim_ready_since >= AIM_STABLE_SECONDS
+        and now - aim_ready_since >= (
+            MOVING_PREDICTIVE_FIRE_STABLE_SECONDS
+            if predictive_aim_aligned
+            else required_aim_stable_seconds
+        )
     )
 
     can_fire = (
-        aim_aligned
+        fire_alignment_ready
         and moving_target_shots_fired < MAX_MOVING_TARGET_SHOTS
         and (
             OBSTACLE_TARGET_MODE
@@ -1734,6 +2053,16 @@ def make_aim_action(info):
         "turret_error_rate": round(turret_error_rate, 3),
         "turret_pd_effort_raw": round(turret_pd_effort_raw, 4),
         "turret_pd_effort": round(turret_pd_effort, 4),
+        "predicted_turret_yaw_rate": round(
+            predicted_turret_yaw_rate,
+            3,
+        ),
+        "lead_boost": round(lead_boost, 4),
+        "yaw_max_weight_multiplier": round(
+            yaw_max_weight_multiplier,
+            4,
+        ),
+        "max_turret_weight": round(max_turret_weight, 4),
         "body_signed_effort": round(body_signed_effort, 4),
         "predicted_body_yaw_rate": round(predicted_body_yaw_rate, 3),
         "body_equivalent_turret_weight": round(
@@ -1744,9 +2073,32 @@ def make_aim_action(info):
 
         "desired_pitch": round(desired_pitch, 2),
         "pitch_error": round(pitch_error, 2),
+        "pitch_signed_effort": round(pitch_signed_effort, 4),
+        "predicted_pitch_rate": round(predicted_pitch_rate, 3),
         "pitch_fire_tolerance": round(pitch_tol, 4),
+        "effective_pitch_fire_tolerance": round(effective_pitch_tol, 4),
+        "turret_fire_tolerance": round(turret_fire_tolerance, 4),
+        "body_fire_tolerance": round(body_fire_tolerance, 4),
+        "required_aim_stable_seconds": round(
+            required_aim_stable_seconds,
+            4,
+        ),
 
         "aim_aligned": aim_aligned,
+        "predictive_aim_aligned": predictive_aim_aligned,
+        "fire_alignment_ready": fire_alignment_ready,
+        "predictive_fire_lookahead_seconds": round(
+            predictive_lookahead,
+            4,
+        ),
+        "predicted_turret_error_at_fire": round(
+            predicted_turret_error_at_fire,
+            3,
+        ),
+        "predicted_pitch_error_at_fire": round(
+            predicted_pitch_error_at_fire,
+            3,
+        ),
         "spawn_arm_ready": spawn_arm_ready,
         "aim_stable_ready": aim_stable_ready,
         "spawn_elapsed_seconds": round(now - spawn_initialized_at, 3),
@@ -1969,6 +2321,14 @@ def moving_target_status():
             "z": round(enemy_velocity_z, 4),
             "speed": round(
                 math.hypot(enemy_velocity_x, enemy_velocity_z),
+                4,
+            ),
+        },
+        "acceleration": {
+            "x": round(enemy_accel_x, 4),
+            "z": round(enemy_accel_z, 4),
+            "accel": round(
+                math.hypot(enemy_accel_x, enemy_accel_z),
                 4,
             ),
         },
