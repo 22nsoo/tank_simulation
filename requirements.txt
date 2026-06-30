@@ -2,3 +2,8 @@
 flask
 pillow
 ultralytics
+sentence-transformers
+faiss-cpu
+chromadb
+matplotlib
+scikit-learn

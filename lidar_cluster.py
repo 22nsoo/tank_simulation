@@ -113,6 +113,11 @@ TANK_LIKE_MIN_WIDTH_DEPTH_RATIO = 1.10
 TANK_LIKE_MIN_HEIGHT_M = 0.25
 TANK_LIKE_MAX_HEIGHT_M = 3.8
 TANK_CONTOUR_MIN_CHANNELS = 3
+TANK_SILHOUETTE_MIN_POINTS = 8
+TANK_SILHOUETTE_MIN_CHANNELS = 3
+TANK_SILHOUETTE_MIN_WIDE_WIDTH_M = 0.8
+TANK_SILHOUETTE_MIN_TOP_NARROW_RATIO = 0.35
+TANK_SILHOUETTE_MIN_EXPAND_STEPS = 1
 TANK_CONTOUR_MIN_WIDTH_VARIATION = 0.20
 TANK_CONTOUR_MIN_GRADUAL_STEPS = 2
 TANK_CONTOUR_STRONG_VARIATION = 0.70
@@ -175,6 +180,13 @@ VALID_OBJECT_MIN_CLUSTER_POINTS = 2
 VALID_OBJECT_CLUSTER_MAX_ANGLE_GAP_DEG = 2.5
 VALID_OBJECT_CLUSTER_MAX_DISTANCE_GAP_M = 5.0
 VALID_OBJECT_CLUSTER_MAX_COUNT = 30
+# Keep lower/base points after a vertical object bin is accepted. Recognition
+# still requires strong vertical evidence, but silhouettes and ROI fusion should
+# not lose the lower hull/track returns.
+VALID_OBJECT_KEEP_BASE_POINTS_MIN_ABOVE_STACK_BASE_M = env_float(
+    "VALID_OBJECT_KEEP_BASE_POINTS_MIN_ABOVE_STACK_BASE_M",
+    0.06,
+)
 SLIDING_CLUSTER_MERGE_ENABLED = True
 SLIDING_CLUSTER_MAX_ANGLE_GAP_DEG = 6.0
 SLIDING_CLUSTER_MAX_DISTANCE_GAP_M = 4.5
@@ -183,6 +195,7 @@ OBJECT_TRACK_MAX_MATCH_DISTANCE_M = 5.0
 OBJECT_TRACK_MAX_AGE_SEC = 2.0
 OBJECT_TRACK_POSITION_ALPHA = 0.45
 OBJECT_TRACK_VELOCITY_ALPHA = 0.30
+OBJECT_TRACK_MEASUREMENT_ALPHA = env_float("OBJECT_TRACK_MEASUREMENT_ALPHA", 0.35)
 # v16.1: a true object surface in this simulator often appears as a near-vertical
 # plane: large height span at almost the same azimuth/range. Smooth hills change
 # height over range and fail this verticality test.
@@ -267,6 +280,29 @@ overlay_settings: dict[str, Any] = {
     "totalLidarBoxLimit": 850,
     "obstaclePixelCell": 2,
     "safeGroundPixelCell": 28,
+
+    # v16.48-style .map answer-sheet hitbox overlay. This uses map/GT pivots,
+    # not LiDAR clusters, and draws the projectile hitbox profile on /detect.
+    "showApproxMapHitbox": True,
+    "approxMapHitboxTarget": "enemy_tank_only",
+    "approxMapHitboxColor": "#FF2020",
+    "approxMapHitboxCenterColor": "#6E0000",
+    "approxMapHitboxLimit": 80,
+    "approxMapHitboxPointLimit": 900,
+    "approxMapHitboxEdgeStepM": 0.35,
+    "approxMapHitboxEdgePointRadiusPx": 2,
+    "approxMapHitboxCenterRadiusPx": 8,
+    "approxMapHitboxYawSign": 1.0,
+    "approxMapHitboxYawOffsetDeg": 0.0,
+    "approxMapHitboxPivotMode": "profile_center",
+    "approxMapHitboxFallbackToLidarTankLike": True,
+    "showLidarTankLikeHitbox": True,
+    "approxTankHitboxSizeX_M": 3.0,
+    "approxTankHitboxSizeY_M": 2.0,
+    "approxTankHitboxSizeZ_M": 5.0,
+    "approxTankHitboxCenterX_M": 0.0,
+    "approxTankHitboxCenterY_M": 0.5,
+    "approxTankHitboxCenterZ_M": 0.4,
 }
 
 # Overlay calibration. LiDAR height is 3.0 m; the camera is assumed to be
@@ -287,12 +323,21 @@ calibration: dict[str, Any] = {
     "turretYawSign": 1.0,
     "turretPitchSign": 1.0,
 
-    # off | ground_plane
-    # ground_plane estimates local slope from LiDAR ground returns. This is a
-    # practical fallback when the simulator does not send chassis roll/pitch.
-    "tiltCompensationMode": "ground_plane",
+    # off | ground_plane | body_pose | body_pose_or_ground_plane | body_pose_blend_ground_plane
+    # ground_plane estimates local slope from LiDAR ground returns. body_pose
+    # uses playerBodyY/Z when the simulator sends chassis tilt.
+    "tiltCompensationMode": "body_pose_blend_ground_plane",
     "tiltSmoothingAlpha": 0.28,
     "maxGroundTiltDeg": 22.0,
+    "maxBodyTiltDeg": 45.0,
+    "bodyTiltYawField": "playerBodyX",
+    "bodyTiltPitchField": "playerBodyY",
+    "bodyTiltRollField": "playerBodyZ",
+    "bodyTiltPitchSign": 1.0,
+    "bodyTiltRollSign": 1.0,
+    "bodyTiltPitchOffsetDeg": 0.0,
+    "bodyTiltRollOffsetDeg": 0.0,
+    "bodyGroundNormalBlend": 0.15,
     "rollOffsetDeg": 0.0,
 }
 
@@ -335,6 +380,19 @@ fusion_settings: dict[str, Any] = {
     "roiExpandRatio": 0.08,
     "roiMinObstaclePoints": 2,
     "roiSurfaceBandM": 3.0,
+
+    # v16.48-compatible tank hitbox profile for LiDAR-only tank_like aiming.
+    # LiDAR sees the visible surface, but firing should aim at the projectile
+    # hitbox center: Tank001/Enemy is approximately x=3, y=2, z=5 meters.
+    "tankUseHitboxProfileForCenter": True,
+    "tankHitboxLengthM": 5.0,
+    "tankHitboxWidthM": 3.0,
+    "tankHitboxHeightM": 2.0,
+    "tankLengthM": 7.0,
+    "tankWidthM": 3.4,
+    "tankDepthModel": "continuous_visible_width",
+    "tankDepthMinVisibleWidthM": 1.0,
+    "tankDepthMaxVisibleWidthPadM": 0.8,
 
     # Fallback: use LiDAR-only obstacle clusters when ROI points are sparse.
     "clusterFallbackEnabled": True,
@@ -686,6 +744,7 @@ aim_settings: dict[str, Any] = {
     "firePitchGateDeg": 2.8,
     "fireCooldownSec": 0.6,
     "fireOnTankCandidate": False,
+    "fireOnLidarTankLike": True,
 
     # v16.3 target-scan behavior:
     # 1) If a fresh YOLO-fused tank exists, aim it before nearest unknown LiDAR object.
@@ -1477,20 +1536,21 @@ def compute_valid_object_mask(
         & (local_count >= flat_min_points)
         & (local_range_span <= flat_range_max)
         & (verticality_ratio >= flat_vert_min)
-        & (above_stack_base >= max(VALID_OBJECT_MIN_ABOVE_STACK_BASE_M, 0.45))
     )
 
     accepted_bin = object_on_hill_bin | flat_object_bin
-    accepted_point = (
+    strong_object_point = (
         ((height_above_terrain >= top_clearance) & object_on_hill_bin)
         | ((above_stack_base >= max(VALID_OBJECT_MIN_ABOVE_STACK_BASE_M, 0.45)) & flat_object_bin)
     )
+    base_keep_clearance = max(0.0, float(VALID_OBJECT_KEEP_BASE_POINTS_MIN_ABOVE_STACK_BASE_M))
+    accepted_stack_base_point = accepted_bin & (above_stack_base >= base_keep_clearance)
     valid = (
         obstacle_mask
         & (distances >= VALID_OBJECT_MIN_DISTANCE_M)
         & (distances <= VALID_OBJECT_MAX_DISTANCE_M)
         & accepted_bin
-        & accepted_point
+        & (strong_object_point | accepted_stack_base_point)
     )
 
     bin_verticality = (max_y - min_y) / np.maximum(0.15, max_r - min_r)
@@ -1531,6 +1591,8 @@ def compute_valid_object_mask(
         "flatObjectMinPoints": flat_min_points,
         "flatObjectMinVerticalityRatio": flat_vert_min,
         "flatObjectMaxRangeSpanM": flat_range_max,
+        "basePointKeepMinAboveStackBaseM": round(float(VALID_OBJECT_KEEP_BASE_POINTS_MIN_ABOVE_STACK_BASE_M), 3),
+        "keepsAcceptedObjectBasePoints": True,
         "maxRangeSpanM": VALID_OBJECT_MAX_RANGE_SPAN_M,
         "minVerticalityRatio": VALID_OBJECT_MIN_VERTICALITY_RATIO,
         "method": "terrain_residual_plus_flat_vertical_stack",
@@ -1631,6 +1693,69 @@ def merge_cluster_groups_sliding_window(
     ]
     merged_counts = [fragment_counts[root] for root in ordered_roots]
     return merged_groups, merged_counts
+
+
+def tank_profile_dimensions_for_center() -> tuple[float, float, float, str]:
+    """Return the v16.48 tank profile used for LiDAR surface -> hitbox center."""
+    if bool(fusion_settings.get("tankUseHitboxProfileForCenter", True)):
+        length = float(fusion_settings.get("tankHitboxLengthM", 5.0))
+        width = float(fusion_settings.get("tankHitboxWidthM", 3.0))
+        height = float(fusion_settings.get("tankHitboxHeightM", 2.0))
+        source = "hitbox_profile"
+    else:
+        length = float(fusion_settings.get("tankLengthM", 7.0))
+        width = float(fusion_settings.get("tankWidthM", 3.4))
+        height = 2.4
+        source = "lidar_visual_profile"
+    return max(0.5, length), max(0.5, width), max(0.5, height), source
+
+
+def estimate_tank_depth_from_visible_width_m(visible_width: float | None) -> tuple[float, dict[str, Any]]:
+    """Estimate hitbox depth along the LiDAR ray from observed lateral width.
+
+    This mirrors the v16.48 idea: a rectangular tank hitbox has length L and
+    width W.  The observed lateral span gives a rough view angle, which gives
+    the depth from visible surface toward the hitbox center.
+    """
+    length, width, height, profile_source = tank_profile_dimensions_for_center()
+    model = str(fusion_settings.get("tankDepthModel", "continuous_visible_width")).strip().lower()
+    if model == "bbox_step":
+        depth = width if visible_width is not None and float(visible_width) >= (length + width) * 0.45 else length
+        return float(depth), {
+            "profileSource": profile_source,
+            "depthModel": model,
+            "visibleWidthM": round(float(visible_width), 3) if visible_width is not None else None,
+            "hitboxSizeM": {"length": round(length, 3), "width": round(width, 3), "height": round(height, 3)},
+        }
+
+    if visible_width is None or not np.isfinite(float(visible_width)):
+        return float(length), {
+            "profileSource": profile_source,
+            "depthModel": model,
+            "reason": "no_visible_width_front_default",
+            "visibleWidthM": None,
+            "hitboxSizeM": {"length": round(length, 3), "width": round(width, 3), "height": round(height, 3)},
+        }
+
+    max_pad = max(0.0, float(fusion_settings.get("tankDepthMaxVisibleWidthPadM", 0.8)))
+    min_vw = max(0.1, float(fusion_settings.get("tankDepthMinVisibleWidthM", 1.0)))
+    vw = max(min_vw, min(length + max_pad, float(visible_width)))
+
+    theta_grid = np.linspace(0.0, np.pi * 0.5, 181, dtype=np.float64)
+    span_grid = length * np.sin(theta_grid) + width * np.cos(theta_grid)
+    depth_grid = length * np.cos(theta_grid) + width * np.sin(theta_grid)
+    best = int(np.argmin(np.abs(span_grid - vw)))
+    theta = float(theta_grid[best])
+    depth = float(depth_grid[best])
+    return depth, {
+        "profileSource": profile_source,
+        "depthModel": model,
+        "visibleWidthM": round(float(visible_width), 3),
+        "visibleWidthClampedM": round(float(vw), 3),
+        "estimatedThetaDeg": round(float(np.degrees(theta)), 2),
+        "hitboxDepthAlongRayM": round(float(depth), 3),
+        "hitboxSizeM": {"length": round(length, 3), "width": round(width, 3), "height": round(height, 3)},
+    }
 
 
 def make_valid_object_clusters(
@@ -1782,7 +1907,47 @@ def make_valid_object_clusters(
             contour_min_width = 0.0
             contour_width_variation = 0.0
             contour_gradual_steps = 0
-        tank_like = bool(
+        silhouette_tank_like = False
+        silhouette_debug: dict[str, Any] = {"matched": False}
+        if contour_widths:
+            widths = np.asarray(contour_widths, dtype=np.float64)
+            meaningful_step = max(0.25, contour_max_width * 0.10)
+
+            def sloped_hull_score(sequence: np.ndarray) -> dict[str, Any]:
+                if sequence.size < TANK_SILHOUETTE_MIN_CHANNELS:
+                    return {"matched": False, "reason": "not_enough_channels"}
+                narrow = float(sequence[0])
+                wide = float(np.max(sequence))
+                min_variation = float(TANK_SILHOUETTE_MIN_TOP_NARROW_RATIO)
+                narrow_ratio = (wide - narrow) / max(0.25, wide)
+                diffs = np.diff(sequence)
+                expand_steps = int(np.sum(diffs >= meaningful_step))
+                shrink_steps = int(np.sum(diffs <= -meaningful_step))
+                matched = bool(
+                    wide >= TANK_SILHOUETTE_MIN_WIDE_WIDTH_M
+                    and narrow_ratio >= min_variation
+                    and expand_steps >= TANK_SILHOUETTE_MIN_EXPAND_STEPS
+                    and shrink_steps <= 1
+                )
+                return {
+                    "matched": matched,
+                    "narrowWidthM": round(narrow, 3),
+                    "wideWidthM": round(wide, 3),
+                    "narrowRatio": round(narrow_ratio, 3),
+                    "expandSteps": expand_steps,
+                    "shrinkSteps": shrink_steps,
+                }
+
+            forward_score = sloped_hull_score(widths)
+            reverse_score = sloped_hull_score(widths[::-1])
+            best_score = forward_score if bool(forward_score.get("matched")) else reverse_score
+            silhouette_tank_like = bool(best_score.get("matched", False))
+            silhouette_debug = {
+                **best_score,
+                "matched": silhouette_tank_like,
+                "direction": "vertical_angle_ascending" if best_score is forward_score else "vertical_angle_descending",
+            }
+        legacy_contour_tank_like = bool(
             vehicle_like
             and contour_channel_count >= TANK_CONTOUR_MIN_CHANNELS
             and contour_width_variation >= TANK_CONTOUR_MIN_WIDTH_VARIATION
@@ -1795,6 +1960,58 @@ def make_valid_object_clusters(
                 )
             )
         )
+        silhouette_tank_like = bool(
+            silhouette_tank_like
+            and vehicle_like
+            and len(group) >= TANK_SILHOUETTE_MIN_POINTS
+            and contour_channel_count >= TANK_SILHOUETTE_MIN_CHANNELS
+            and VEHICLE_MIN_WIDTH_M <= visible_width <= VEHICLE_MAX_WIDTH_M
+            and TANK_LIKE_MIN_HEIGHT_M <= object_height_above_terrain <= TANK_LIKE_MAX_HEIGHT_M
+            and depth_span <= VEHICLE_MAX_DEPTH_M
+        )
+        tank_like = bool(silhouette_tank_like)
+        tank_like_reason = (
+            "sloped_hull_silhouette"
+            if silhouette_tank_like
+            else None
+        )
+        hitbox_aim_debug: dict[str, Any] = {"enabled": False}
+        hitbox_center_distance = None
+        if tank_like and bool(fusion_settings.get("tankUseHitboxProfileForCenter", True)):
+            _hitbox_l, _hitbox_w, hitbox_h, hitbox_profile_source = tank_profile_dimensions_for_center()
+            hitbox_depth, hitbox_depth_debug = estimate_tank_depth_from_visible_width_m(visible_width)
+            hitbox_center_distance = surface_distance + max(0.0, float(hitbox_depth)) * 0.5
+            hitbox_center_range = median_range + max(0.0, float(hitbox_depth)) * 0.5
+            hitbox_center_y = object_base_y + hitbox_h * 0.5
+            hitbox_aim_point_y = hitbox_center_y
+            hitbox_aim_pitch = float(
+                np.degrees(
+                    np.arctan2(
+                        hitbox_aim_point_y - float(lidar_origin_y),
+                        max(0.5, hitbox_center_range),
+                    )
+                )
+            )
+            aim_point_y = hitbox_aim_point_y
+            aim_pitch = hitbox_aim_pitch
+            aim_clearance = hitbox_h * 0.5
+            world_geometry = compact_world_geometry(group_xyz, surface_xyz_for_world, aim_point_y)
+            hitbox_aim_debug = {
+                "enabled": True,
+                "source": "v16_48_tank_hitbox_profile",
+                "profileSource": hitbox_profile_source,
+                "surfaceDistanceM": round(float(surface_distance), 3),
+                "centerDistanceM": round(float(hitbox_center_distance), 3),
+                "centerRangeM": round(float(hitbox_center_range), 3),
+                "centerHeightFromBaseM": round(float(hitbox_h * 0.5), 3),
+                "aimPitchDeg": round(float(aim_pitch), 3),
+                "depth": hitbox_depth_debug,
+            }
+        rectangular_obstacle_like = bool(
+            vehicle_like
+            and contour_channel_count >= TANK_SILHOUETTE_MIN_CHANNELS
+            and contour_width_variation < TANK_CONTOUR_MIN_WIDTH_VARIATION
+        )
         key = f"a{round(median_angle / 2.0) * 2:+.0f}_d{round(surface_distance / 5.0) * 5:.0f}"
         clusters.append({
             "clusterId": int(cluster_id),
@@ -1806,6 +2023,7 @@ def make_valid_object_clusters(
             "candidateKey": key,
             "angleDeg": round(median_angle, 3),
             "distanceM": round(surface_distance, 3),
+            "hitboxCenterDistanceM": round(float(hitbox_center_distance), 3) if hitbox_center_distance is not None else None,
             "surfaceDistanceM": round(surface_distance, 3),
             "medianDistanceM": round(median_distance, 3),
             "farDistanceM": round(far_distance, 3),
@@ -1834,6 +2052,11 @@ def make_valid_object_clusters(
             "contourMaxWidthM": round(contour_max_width, 3),
             "contourWidthVariation": round(contour_width_variation, 3),
             "contourGradualSteps": int(contour_gradual_steps),
+            "legacyContourTankLike": legacy_contour_tank_like,
+            "tankLikeReason": tank_like_reason,
+            "tankSilhouette": json_copy(silhouette_debug),
+            "tankHitboxAim": json_copy(hitbox_aim_debug),
+            "rectangularObstacleLike": rectangular_obstacle_like,
             "objectFilter": "terrain_residual_plus_vertical_plane",
         })
     if LIDAR_VEHICLE_EXTRACTION_ENABLED:
@@ -1982,6 +2205,7 @@ def assign_persistent_object_ids(
                 }
 
             track = object_tracks[track_id]
+            enriched = output[int(observation["index"])]
             previous_x = float(track["x"])
             previous_y = float(track["y"])
             previous_z = float(track["z"])
@@ -1996,6 +2220,7 @@ def assign_persistent_object_ids(
             measured_vz = (observation["z"] - previous_z) / dt
             position_alpha = OBJECT_TRACK_POSITION_ALPHA
             velocity_alpha = OBJECT_TRACK_VELOCITY_ALPHA
+            measurement_alpha = max(0.01, min(1.0, float(OBJECT_TRACK_MEASUREMENT_ALPHA)))
             track["x"] = (1.0 - position_alpha) * previous_x + position_alpha * observation["x"]
             track["y"] = (1.0 - position_alpha) * previous_y + position_alpha * observation["y"]
             track["z"] = (1.0 - position_alpha) * previous_z + position_alpha * observation["z"]
@@ -2006,9 +2231,41 @@ def assign_persistent_object_ids(
             track["lastMonotonic"] = now_mono
             track["lastSimulationTime"] = sim_time
 
-            enriched = output[int(observation["index"])]
+            raw_angle = safe_float(enriched.get("angleDeg"), None)
+            if raw_angle is not None:
+                previous_angle = safe_float(track.get("angleDeg"), raw_angle)
+                smoothed_angle = normalize_signed_angle(
+                    float(previous_angle)
+                    + normalize_signed_angle(float(raw_angle) - float(previous_angle))
+                    * measurement_alpha
+                )
+                track["angleDeg"] = smoothed_angle
+                enriched["rawAngleDeg"] = round(float(raw_angle), 3)
+                enriched["angleDeg"] = round(float(smoothed_angle), 3)
+
+            for key in (
+                "distanceM",
+                "surfaceDistanceM",
+                "medianDistanceM",
+                "horizontalRangeM",
+                "aimPitchDeg",
+            ):
+                raw_value = safe_float(enriched.get(key), None)
+                if raw_value is None:
+                    continue
+                track_key = key
+                previous_value = safe_float(track.get(track_key), raw_value)
+                smoothed_value = (
+                    (1.0 - measurement_alpha) * float(previous_value)
+                    + measurement_alpha * float(raw_value)
+                )
+                track[track_key] = smoothed_value
+                enriched[f"raw{key[:1].upper()}{key[1:]}"] = round(float(raw_value), 3)
+                enriched[key] = round(float(smoothed_value), 3)
+
             enriched["objectId"] = f"OBJ-{track_id:03d}"
             enriched["trackHits"] = int(track["hits"])
+            enriched["trackMeasurementAlpha"] = round(float(measurement_alpha), 3)
             enriched["trackedWorldCenter"] = {
                 "x": round(float(track["x"]), 3),
                 "y": round(float(track["y"]), 3),
@@ -2039,6 +2296,128 @@ def vector_angle_deg(a: np.ndarray, b: np.ndarray) -> float:
     b_n = normalize_vector(b)
     dot = float(np.clip(np.dot(a_n, b_n), -1.0, 1.0))
     return float(np.degrees(np.arccos(dot)))
+
+
+def _pose_float(pose: dict[str, Any] | None, field_name: Any, default: float | None = None) -> float | None:
+    if pose is None:
+        return default
+    key = str(field_name or "").strip()
+    if not key:
+        return default
+    return safe_float(pose.get(key), default)
+
+
+def rotation_matrix_from_euler_degrees(x_deg: float, y_deg: float, z_deg: float) -> np.ndarray:
+    """Unity-style XYZ Euler helper used only for chassis up-axis projection."""
+    x = radians(float(x_deg))
+    y = radians(float(y_deg))
+    z = radians(float(z_deg))
+    cx, sx = cos(x), sin(x)
+    cy, sy = cos(y), sin(y)
+    cz, sz = cos(z), sin(z)
+    rx = np.asarray(
+        ((1.0, 0.0, 0.0), (0.0, cx, -sx), (0.0, sx, cx)),
+        dtype=np.float64,
+    )
+    ry = np.asarray(
+        ((cy, 0.0, sy), (0.0, 1.0, 0.0), (-sy, 0.0, cy)),
+        dtype=np.float64,
+    )
+    rz = np.asarray(
+        ((cz, -sz, 0.0), (sz, cz, 0.0), (0.0, 0.0, 1.0)),
+        dtype=np.float64,
+    )
+    return rz @ ry @ rx
+
+
+def player_body_tilt_up_axis(pose: dict[str, Any] | None) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """Return chassis up-axis from playerBodyY/Z when those pose fields exist."""
+    if pose is None:
+        return None, {"status": "no_pose"}
+
+    yaw = _pose_float(pose, calibration.get("bodyTiltYawField", "playerBodyX"), 0.0)
+    pitch_raw = _pose_float(pose, calibration.get("bodyTiltPitchField", "playerBodyY"), None)
+    roll_raw = _pose_float(pose, calibration.get("bodyTiltRollField", "playerBodyZ"), None)
+    if pitch_raw is None or roll_raw is None:
+        return None, {
+            "status": "missing_body_tilt",
+            "pitchField": calibration.get("bodyTiltPitchField", "playerBodyY"),
+            "rollField": calibration.get("bodyTiltRollField", "playerBodyZ"),
+            "pitchRaw": pitch_raw,
+            "rollRaw": roll_raw,
+        }
+
+    pitch = (
+        float(calibration.get("bodyTiltPitchSign", 1.0)) * float(pitch_raw)
+        + float(calibration.get("bodyTiltPitchOffsetDeg", 0.0))
+    )
+    roll_sign = float(calibration.get("bodyTiltRollSign", 1.0))
+    roll = (
+        roll_sign * float(roll_raw)
+        + float(calibration.get("bodyTiltRollOffsetDeg", 0.0))
+    )
+    yaw = float(yaw or 0.0)
+
+    max_tilt = max(0.0, float(calibration.get("maxBodyTiltDeg", 45.0)))
+    pitch = max(-max_tilt, min(max_tilt, pitch))
+    roll = max(-max_tilt, min(max_tilt, roll))
+
+    matrix = rotation_matrix_from_euler_degrees(pitch, yaw, roll)
+    up = normalize_vector(matrix[:, 1], fallback=(0.0, 1.0, 0.0))
+    if up[1] < 0.0:
+        up = -up
+
+    tilt_deg = vector_angle_deg(up, np.asarray((0.0, 1.0, 0.0), dtype=np.float32))
+    return up.astype(np.float32), {
+        "status": "ok",
+        "source": "player_body_yz",
+        "yawField": calibration.get("bodyTiltYawField", "playerBodyX"),
+        "pitchField": calibration.get("bodyTiltPitchField", "playerBodyY"),
+        "rollField": calibration.get("bodyTiltRollField", "playerBodyZ"),
+        "yawDeg": round(float(yaw), 3),
+        "pitchRawDeg": round(float(pitch_raw), 3),
+        "rollRawDeg": round(float(roll_raw), 3),
+        "rollSignUsed": round(float(roll_sign), 3),
+        "pitchUsedDeg": round(float(pitch), 3),
+        "rollUsedDeg": round(float(roll), 3),
+        "tiltDeg": round(float(tilt_deg), 3),
+        "upAxis": [round(float(v), 6) for v in up.tolist()],
+    }
+
+
+def projection_up_axis_from_pose(
+    pose: dict[str, Any] | None,
+    ground_normal: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Choose the up-axis used for LiDAR/camera screen projection."""
+    mode = str(calibration.get("tiltCompensationMode", "body_pose_blend_ground_plane")).strip().lower()
+    world_up = np.asarray((0.0, 1.0, 0.0), dtype=np.float32)
+    ground_up = normalize_vector(ground_normal if ground_normal is not None else world_up, fallback=(0.0, 1.0, 0.0))
+    body_up, body_debug = player_body_tilt_up_axis(pose)
+
+    if mode == "off":
+        return world_up, {"mode": mode, "source": "world_up", "body": body_debug}
+    if mode == "ground_plane":
+        return ground_up.astype(np.float32), {"mode": mode, "source": "ground_plane", "body": body_debug}
+    if mode == "body_pose":
+        if body_up is not None:
+            return body_up.astype(np.float32), {"mode": mode, "source": "body_pose", "body": body_debug}
+        return world_up, {"mode": mode, "source": "world_up_fallback", "body": body_debug}
+    if mode == "body_pose_blend_ground_plane":
+        if body_up is not None:
+            ground_w = max(0.0, min(1.0, float(calibration.get("bodyGroundNormalBlend", 0.15))))
+            mixed = normalize_vector((1.0 - ground_w) * body_up + ground_w * ground_up, fallback=(0.0, 1.0, 0.0))
+            return mixed.astype(np.float32), {
+                "mode": mode,
+                "source": "body_ground_blend",
+                "groundWeight": round(float(ground_w), 3),
+                "body": body_debug,
+            }
+        return ground_up.astype(np.float32), {"mode": mode, "source": "ground_plane_fallback", "body": body_debug}
+
+    if body_up is not None:
+        return body_up.astype(np.float32), {"mode": mode, "source": "body_pose", "body": body_debug}
+    return ground_up.astype(np.float32), {"mode": mode, "source": "ground_plane_fallback", "body": body_debug}
 
 
 def estimate_local_ground_normal(
@@ -2251,6 +2630,21 @@ def gt_object_id(raw: dict[str, Any], fallback_prefix: str) -> str:
     )
 
 
+def extract_rotation_payload(raw: Any) -> Any:
+    """Return a likely object rotation payload from simulator/.map records."""
+    if not isinstance(raw, dict):
+        return None
+    for key in (
+        "rotation", "Rotation", "rot", "Rot", "euler", "Euler",
+        "rotationEuler", "rotation_euler", "quaternion", "Quaternion",
+        "worldRotation", "world_rotation",
+    ):
+        value = raw.get(key)
+        if value is not None:
+            return json_copy(value)
+    return None
+
+
 def register_gt_object(
     raw: dict[str, Any],
     source: str,
@@ -2279,6 +2673,8 @@ def register_gt_object(
         "canonicalClass": canonical_gt_class_name(class_name),
         "position": position,
         "radiusM": float(radius) if radius is not None and radius >= 0 else None,
+        "rotation": extract_rotation_payload(raw),
+        "prefabName": str(raw.get("prefabName", "")) if raw.get("prefabName") is not None else None,
         "dynamic": bool(dynamic),
         "source": source,
         "updatedAt": now_text(),
@@ -3138,6 +3534,7 @@ def build_frame_cache(data: dict[str, Any], seq: int) -> FrameCache:
     clusters = merge_split_world_clusters(clusters)
     clusters = assign_persistent_object_ids(clusters, data.get("time"))
 
+    projection_up, projection_tilt_debug = projection_up_axis_from_pose(pose_subset, ground_normal)
     ground_plane_debug = {
         **ground_plane_debug,
         "smoothedNormal": [round(float(value), 6) for value in ground_normal.tolist()],
@@ -3145,6 +3542,12 @@ def build_frame_cache(data: dict[str, Any], seq: int) -> FrameCache:
             vector_angle_deg(ground_normal, np.asarray((0.0, 1.0, 0.0), dtype=np.float32)),
             3,
         ),
+        "projectionUpNormal": [round(float(value), 6) for value in projection_up.tolist()],
+        "projectionTiltDeg": round(
+            vector_angle_deg(projection_up, np.asarray((0.0, 1.0, 0.0), dtype=np.float32)),
+            3,
+        ),
+        "projectionTilt": projection_tilt_debug,
         "terrainProfile": terrain_profile_debug,
         "objectFilter": object_filter_debug,
     }
@@ -3249,6 +3652,7 @@ def camera_basis(
     yaw_deg: float,
     pitch_deg: float,
     ground_normal: np.ndarray | None = None,
+    pose: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Build the camera frame.
@@ -3263,12 +3667,7 @@ def camera_basis(
     yaw = radians(yaw_deg)
     pitch = radians(pitch_deg)
 
-    if str(calibration.get("tiltCompensationMode", "ground_plane")) == "off":
-        base_up = np.asarray((0.0, 1.0, 0.0), dtype=np.float32)
-    else:
-        base_up = normalize_vector(
-            np.asarray(ground_normal if ground_normal is not None else (0.0, 1.0, 0.0)),
-        )
+    base_up, _tilt_debug = projection_up_axis_from_pose(pose, ground_normal)
 
     yaw_forward = np.asarray((sin(yaw), 0.0, cos(yaw)), dtype=np.float32)
     base_forward = yaw_forward - base_up * float(np.dot(yaw_forward, base_up))
@@ -3304,7 +3703,7 @@ def camera_origin(
     if origin_raw is None:
         return None
 
-    right, up, forward = camera_basis(yaw_deg, pitch_deg, ground_normal)
+    right, up, forward = camera_basis(yaw_deg, pitch_deg, ground_normal, pose=pose)
     origin = np.asarray(origin_raw, dtype=np.float32)
     origin = origin + right * float(calibration.get("cameraOffsetRightM", 0.0))
     origin = origin + up * float(calibration.get("cameraOffsetUpM", 0.0))
@@ -3334,7 +3733,7 @@ def project_cached_points(
             "y": np.empty(0, dtype=np.int32),
         }
 
-    right, up, forward = camera_basis(yaw_deg, pitch_deg, cache.ground_normal)
+    right, up, forward = camera_basis(yaw_deg, pitch_deg, cache.ground_normal, pose=cache.pose)
     delta = cache.xyz - origin
 
     x_cam = delta @ right
@@ -3425,6 +3824,276 @@ def make_lidar_box(x_px: int, y_px: int, color: str, radius_px: int | None = Non
         "filled": True,
         "updateBoxWhileMoving": UPDATE_BOX_WHILE_MOVING,
     }
+
+
+def rotation_y_degrees(raw_rotation: Any) -> float:
+    if raw_rotation is None:
+        return 0.0
+    if isinstance(raw_rotation, dict):
+        quat_values = {}
+        for key in ("x", "y", "z", "w"):
+            value = safe_float(raw_rotation.get(key), None)
+            if value is not None:
+                quat_values[key] = float(value)
+        if len(quat_values) == 4:
+            xq = quat_values["x"]
+            yq = quat_values["y"]
+            zq = quat_values["z"]
+            wq = quat_values["w"]
+            # Unity-style yaw around world Y from quaternion.
+            siny_cosp = 2.0 * (wq * yq + xq * zq)
+            cosy_cosp = 1.0 - 2.0 * (yq * yq + zq * zq)
+            return float(np.degrees(np.arctan2(siny_cosp, cosy_cosp)))
+        for key in ("y", "Y", "yaw", "Yaw"):
+            value = safe_float(raw_rotation.get(key), None)
+            if value is not None:
+                return float(value)
+        nested = raw_rotation.get("euler") or raw_rotation.get("Euler")
+        if nested is not None and nested is not raw_rotation:
+            return rotation_y_degrees(nested)
+    if isinstance(raw_rotation, (list, tuple)) and len(raw_rotation) >= 3:
+        value = safe_float(raw_rotation[1], None)
+        return float(value) if value is not None else 0.0
+    value = safe_float(raw_rotation, None)
+    return float(value) if value is not None else 0.0
+
+
+def hitbox_basis_y(yaw_deg: float) -> tuple[np.ndarray, np.ndarray]:
+    yaw = radians(float(yaw_deg))
+    c = cos(yaw)
+    s = sin(yaw)
+    local_x = np.asarray((c, 0.0, -s), dtype=np.float32)
+    local_z = np.asarray((s, 0.0, c), dtype=np.float32)
+    return local_x, local_z
+
+
+def projected_world_points(
+    points: np.ndarray,
+    cache: FrameCache,
+    turret_state: dict[str, Any],
+    image_width: int,
+    image_height: int,
+) -> dict[str, np.ndarray]:
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    if pts.size == 0:
+        return {"x": np.empty(0, dtype=np.int32), "y": np.empty(0, dtype=np.int32), "valid": np.empty(0, dtype=bool)}
+
+    yaw_deg, pitch_deg, _ = camera_angles(cache.pose, turret_state)
+    origin = camera_origin(cache.pose, yaw_deg, pitch_deg, cache.ground_normal)
+    if origin is None:
+        return {"x": np.empty(0, dtype=np.int32), "y": np.empty(0, dtype=np.int32), "valid": np.zeros(pts.shape[0], dtype=bool)}
+
+    right, up, forward = camera_basis(yaw_deg, pitch_deg, cache.ground_normal, pose=cache.pose)
+    delta = pts - origin
+    x_cam = delta @ right
+    y_cam = delta @ up
+    z_cam = delta @ forward
+
+    hfov = float(calibration.get("cameraHorizontalFovDeg", 48.0))
+    vfov = float(calibration.get("cameraVerticalFovDeg", 28.0))
+    fx = image_width / (2.0 * tan(radians(hfov / 2.0)))
+    fy = image_height / (2.0 * tan(radians(vfov / 2.0)))
+    cx = image_width / 2.0 + float(calibration.get("screenCenterOffsetXPx", 0.0))
+    cy = image_height / 2.0 + float(calibration.get("screenCenterOffsetYPx", 0.0))
+    z_safe = np.maximum(z_cam, 1e-6)
+    x_px = np.rint(cx + fx * (x_cam / z_safe)).astype(np.int32)
+    y_px = np.rint(cy - fy * (y_cam / z_safe)).astype(np.int32)
+    valid = (
+        (z_cam > 0.05)
+        & (x_px >= 0)
+        & (x_px < image_width)
+        & (y_px >= 0)
+        & (y_px < image_height)
+    )
+    return {"x": x_px[valid], "y": y_px[valid], "valid": valid, "x_all": x_px, "y_all": y_px}
+
+
+def tank_gt_record_for_hitbox(record: dict[str, Any]) -> bool:
+    target = str(overlay_settings.get("approxMapHitboxTarget", "enemy_tank_only")).strip().lower()
+    canonical = canonical_gt_class_name(record.get("className"))
+    if target in {"all", "any", "*"}:
+        return True
+    if target in {"tank", "tank_only", "tanks"}:
+        return canonical == "tank"
+    if canonical != "tank":
+        return False
+    tokens = " ".join(str(record.get(k, "")) for k in ("id", "className", "prefabName", "source")).lower()
+    if any(bad in tokens for bad in ("ally", "friendly", "tank_ally")):
+        return False
+    return any(good in tokens for good in ("tank001", "enemy", "tank_enemy", "enemy_tank", "tank"))
+
+
+def tank_hitbox_corners_from_center(center: np.ndarray, yaw_deg: float) -> tuple[np.ndarray, np.ndarray]:
+    sx = float(overlay_settings.get("approxTankHitboxSizeX_M", 3.0))
+    sy = float(overlay_settings.get("approxTankHitboxSizeY_M", 2.0))
+    sz = float(overlay_settings.get("approxTankHitboxSizeZ_M", 5.0))
+    local_x, local_z = hitbox_basis_y(yaw_deg)
+    hx, hy, hz = sx * 0.5, sy * 0.5, sz * 0.5
+    corners = []
+    for dx, dy, dz in (
+        (-hx, -hy, -hz), (hx, -hy, -hz), (hx, -hy, hz), (-hx, -hy, hz),
+        (-hx, hy, -hz), (hx, hy, -hz), (hx, hy, hz), (-hx, hy, hz),
+    ):
+        corners.append(center + local_x * dx + np.asarray((0.0, dy, 0.0), dtype=np.float32) + local_z * dz)
+    return np.asarray(corners, dtype=np.float32), center.astype(np.float32)
+
+
+def tank_hitbox_corners_from_gt(record: dict[str, Any]) -> tuple[np.ndarray, np.ndarray] | None:
+    position = extract_position_dict(record.get("position"))
+    if position is None:
+        return None
+    pivot = np.asarray((position["x"], position["y"], position["z"]), dtype=np.float32)
+    yaw = normalize_signed_angle(
+        float(overlay_settings.get("approxMapHitboxYawSign", 1.0)) * rotation_y_degrees(record.get("rotation"))
+        + float(overlay_settings.get("approxMapHitboxYawOffsetDeg", 0.0))
+    )
+    local_x, local_z = hitbox_basis_y(yaw)
+    center = pivot.copy()
+    if str(overlay_settings.get("approxMapHitboxPivotMode", "profile_center")).strip().lower() in {"profile", "profile_center", "collider", "collider_center"}:
+        center = center + local_x * float(overlay_settings.get("approxTankHitboxCenterX_M", 0.0))
+        center = center + local_z * float(overlay_settings.get("approxTankHitboxCenterZ_M", 0.4))
+        center[1] += float(overlay_settings.get("approxTankHitboxCenterY_M", 0.5))
+    else:
+        center[1] += float(overlay_settings.get("approxTankHitboxSizeY_M", 2.0)) * 0.5
+
+    return tank_hitbox_corners_from_center(center.astype(np.float32), yaw)
+
+
+def tank_hitbox_corners_from_lidar_cluster(
+    cluster: dict[str, Any],
+    cache: FrameCache,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if not bool(cluster.get("tankLike", False)):
+        return None
+    raw_center = cluster.get("worldCenter") or cluster.get("surfaceCenterWorld") or cluster.get("aimPointWorld")
+    position = extract_position_dict(raw_center)
+    if position is None:
+        return None
+    center = np.asarray((position["x"], position["y"], position["z"]), dtype=np.float32)
+    base_y = safe_float(cluster.get("objectBaseYWorldM"), None)
+    if base_y is not None:
+        center[1] = float(base_y) + float(overlay_settings.get("approxTankHitboxCenterY_M", 0.5))
+
+    origin = get_xyz(cache.pose.get("lidarOrigin")) if isinstance(cache.pose, dict) else None
+    if origin is None:
+        player_pos = pose_position(cache.pose)
+        origin = player_pos if player_pos is not None else np.asarray((0.0, 0.0, 0.0), dtype=np.float32)
+    dx = float(center[0] - origin[0])
+    dz = float(center[2] - origin[2])
+    if abs(dx) < 1e-6 and abs(dz) < 1e-6:
+        angle = safe_float(cluster.get("angleDeg"), 0.0) or 0.0
+        body_yaw = _pose_float(cache.pose, "playerBodyX", 0.0)
+        yaw = normalize_signed_angle(float(body_yaw) + float(angle))
+    else:
+        yaw = normalize_signed_angle(float(np.degrees(np.arctan2(dx, dz))))
+    return tank_hitbox_corners_from_center(center.astype(np.float32), yaw)
+
+
+def sample_hitbox_edges(corners: np.ndarray, step_m: float) -> np.ndarray:
+    edges = ((0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7))
+    pts = []
+    step = max(0.1, float(step_m))
+    for a, b in edges:
+        p0 = corners[a]
+        p1 = corners[b]
+        dist = float(np.linalg.norm(p1 - p0))
+        count = max(2, min(80, int(np.ceil(dist / step)) + 1))
+        for t in np.linspace(0.0, 1.0, count, dtype=np.float32):
+            pts.append(p0 * (1.0 - t) + p1 * t)
+    return np.asarray(pts, dtype=np.float32)
+
+
+def approx_map_hitbox_boxes(
+    cache: FrameCache,
+    turret_state: dict[str, Any],
+    width: int,
+    height: int,
+) -> list[dict[str, Any]]:
+    if not bool(overlay_settings.get("showApproxMapHitbox", True)):
+        return []
+    ensure_map_gt_available()
+    with state_lock:
+        records = [json_copy(item) for item in ground_truth_state.get("objects", {}).values()]
+    if not records:
+        return []
+
+    boxes: list[dict[str, Any]] = []
+    limit = max(0, int(overlay_settings.get("approxMapHitboxLimit", 80)))
+    budget = max(0, int(overlay_settings.get("approxMapHitboxPointLimit", 900)))
+    color = str(overlay_settings.get("approxMapHitboxColor", "#FF2020"))
+    center_color = str(overlay_settings.get("approxMapHitboxCenterColor", "#6E0000"))
+    edge_radius = int(overlay_settings.get("approxMapHitboxEdgePointRadiusPx", 2))
+    center_radius = int(overlay_settings.get("approxMapHitboxCenterRadiusPx", 8))
+    step_m = float(overlay_settings.get("approxMapHitboxEdgeStepM", 0.35))
+
+    drawn = 0
+    for record in records:
+        if drawn >= limit or (budget and len(boxes) >= budget):
+            break
+        if not gt_object_is_active(record) or not tank_gt_record_for_hitbox(record):
+            continue
+        result = tank_hitbox_corners_from_gt(record)
+        if result is None:
+            continue
+        corners, center = result
+        edge_points = sample_hitbox_edges(corners, step_m)
+        remaining = budget - len(boxes) if budget else edge_points.shape[0]
+        if remaining <= 0:
+            break
+        if edge_points.shape[0] > remaining:
+            edge_points = edge_points[np.linspace(0, edge_points.shape[0] - 1, remaining).astype(np.int32)]
+        proj = projected_world_points(edge_points, cache, turret_state, width, height)
+        for x_px, y_px in zip(proj.get("x", np.empty(0)).tolist(), proj.get("y", np.empty(0)).tolist()):
+            boxes.append(make_lidar_box(int(x_px), int(y_px), color=color, radius_px=edge_radius))
+        center_proj = projected_world_points(center.reshape(1, 3), cache, turret_state, width, height)
+        if center_proj.get("x", np.empty(0)).size:
+            boxes.append(make_lidar_box(int(center_proj["x"][0]), int(center_proj["y"][0]), color=center_color, radius_px=center_radius, label="HITBOX"))
+        drawn += 1
+    return boxes[:budget] if budget else boxes
+
+
+def lidar_tank_like_hitbox_boxes(
+    cache: FrameCache,
+    turret_state: dict[str, Any],
+    width: int,
+    height: int,
+) -> list[dict[str, Any]]:
+    if not bool(overlay_settings.get("showLidarTankLikeHitbox", True)):
+        return []
+    limit = max(0, int(overlay_settings.get("approxMapHitboxLimit", 80)))
+    budget = max(0, int(overlay_settings.get("approxMapHitboxPointLimit", 900)))
+    color = str(overlay_settings.get("approxMapHitboxColor", "#FF2020"))
+    center_color = str(overlay_settings.get("approxMapHitboxCenterColor", "#6E0000"))
+    edge_radius = int(overlay_settings.get("approxMapHitboxEdgePointRadiusPx", 2))
+    center_radius = int(overlay_settings.get("approxMapHitboxCenterRadiusPx", 8))
+    step_m = float(overlay_settings.get("approxMapHitboxEdgeStepM", 0.35))
+
+    clusters = [cluster for cluster in cache.clusters if bool(cluster.get("tankLike", False))]
+    clusters.sort(key=lambda item: safe_float(item.get("hitboxCenterDistanceM"), item.get("distanceM")) or 9999.0)
+
+    boxes: list[dict[str, Any]] = []
+    drawn = 0
+    for cluster in clusters:
+        if drawn >= limit or (budget and len(boxes) >= budget):
+            break
+        result = tank_hitbox_corners_from_lidar_cluster(cluster, cache)
+        if result is None:
+            continue
+        corners, center = result
+        edge_points = sample_hitbox_edges(corners, step_m)
+        remaining = budget - len(boxes) if budget else edge_points.shape[0]
+        if remaining <= 0:
+            break
+        if edge_points.shape[0] > remaining:
+            edge_points = edge_points[np.linspace(0, edge_points.shape[0] - 1, remaining).astype(np.int32)]
+        proj = projected_world_points(edge_points, cache, turret_state, width, height)
+        for x_px, y_px in zip(proj.get("x", np.empty(0)).tolist(), proj.get("y", np.empty(0)).tolist()):
+            boxes.append(make_lidar_box(int(x_px), int(y_px), color=color, radius_px=edge_radius))
+        center_proj = projected_world_points(center.reshape(1, 3), cache, turret_state, width, height)
+        if center_proj.get("x", np.empty(0)).size:
+            boxes.append(make_lidar_box(int(center_proj["x"][0]), int(center_proj["y"][0]), color=center_color, radius_px=center_radius, label="LIDAR_HITBOX"))
+        drawn += 1
+    return boxes[:budget] if budget else boxes
 
 
 def lidar_vehicle_cluster_mask(cache: FrameCache) -> np.ndarray:
@@ -4732,16 +5401,27 @@ def detect():
 
     _, _, pose_debug = camera_angles(cache.pose, turret_state)
     lidar_boxes, projected_count = render_lidar_overlay_boxes(cache, turret_state, width, height)
+    hitbox_boxes = approx_map_hitbox_boxes(cache, turret_state, width, height)
+    hitbox_source = "map_gt" if hitbox_boxes else None
+    if (
+        not hitbox_boxes
+        and bool(overlay_settings.get("approxMapHitboxFallbackToLidarTankLike", True))
+    ):
+        hitbox_boxes = lidar_tank_like_hitbox_boxes(cache, turret_state, width, height)
+        if hitbox_boxes:
+            hitbox_source = "lidar_tank_like"
     maybe_submit_yolo_job(image_bytes, width, height, cache, turret_state)
     fused_boxes = current_fused_boxes(cache, turret_state)
 
-    response_boxes = fused_boxes + lidar_boxes
+    response_boxes = hitbox_boxes + fused_boxes + lidar_boxes
     processing_ms = round((monotonic() - started) * 1000.0, 2)
 
     with state_lock:
         status_state["detectRequestCount"] += 1
         status_state["lastDetectProcessingMs"] = processing_ms
         status_state["lastReturnedLidarBoxCount"] = len(lidar_boxes)
+        status_state["lastReturnedHitboxBoxCount"] = len(hitbox_boxes)
+        status_state["lastReturnedHitboxSource"] = hitbox_source
         status_state["lastReturnedFusedBoxCount"] = len(fused_boxes)
         status_state["lastProjectedPointCount"] = projected_count
         status_state["lastImageSize"] = [width, height]
@@ -4771,6 +5451,92 @@ def current_turret_body_yaw_deg(cache: FrameCache, turret_state: dict[str, Any])
 
 def current_turret_pitch_deg(turret_state: dict[str, Any]) -> float:
     return safe_float(turret_state.get("y"), 0.0) or 0.0
+
+
+def estimate_barrel_impact(cache: FrameCache, turret_state: dict[str, Any]) -> dict[str, Any]:
+    """Estimate where the current barrel ray intersects the LiDAR scene.
+
+    This is a visual/debug aid, not a full projectile solver. It follows the
+    current turret/camera forward ray and picks the first LiDAR return close to
+    that ray, so the web UI can show where a shot is currently pointed.
+    """
+    origin_raw = get_xyz(cache.pose.get("lidarOrigin")) if isinstance(cache.pose, dict) else None
+    if origin_raw is None:
+        player = current_player_position(cache)
+        if player is None:
+            return {"status": "no_origin"}
+        origin = player.astype(np.float32)
+    else:
+        origin = np.asarray(origin_raw, dtype=np.float32)
+
+    yaw_deg, pitch_deg, pose_debug = camera_angles(cache.pose, turret_state)
+    _right, _up, forward = camera_basis(yaw_deg, pitch_deg, cache.ground_normal, pose=cache.pose)
+    forward = normalize_vector(forward)
+
+    max_range = float(aim_settings.get("maxCandidateDistanceM", 120.0))
+    ray_end = origin + forward * max_range
+    result: dict[str, Any] = {
+        "status": "no_lidar_intersection",
+        "method": "barrel_ray_nearest_lidar_return",
+        "origin": xyz_to_dict(origin),
+        "rayEnd": xyz_to_dict(ray_end),
+        "yawDeg": round(float(yaw_deg), 3),
+        "pitchDeg": round(float(pitch_deg), 3),
+        "pose": pose_debug,
+    }
+
+    if cache.xyz.size == 0:
+        return result
+
+    pts = cache.xyz.astype(np.float32, copy=False)
+    delta = pts - origin.reshape(1, 3)
+    along = delta @ forward
+    valid = (along >= 3.0) & (along <= max_range)
+    if cache.distances.size == along.size:
+        valid &= cache.distances <= max_range
+    if not np.any(valid):
+        return result
+
+    perp_vec = delta - along.reshape(-1, 1) * forward.reshape(1, 3)
+    perp = np.linalg.norm(perp_vec, axis=1)
+    threshold = np.maximum(0.45, 0.026 * along)
+    hit_mask = valid & (perp <= threshold)
+
+    nearest_indices = np.flatnonzero(valid)
+    nearest_score = perp[nearest_indices] / np.maximum(1.0, threshold[nearest_indices])
+    nearest_idx = int(nearest_indices[int(np.argmin(nearest_score))])
+    result["nearestMiss"] = {
+        "point": xyz_to_dict(pts[nearest_idx]),
+        "rangeM": round(float(along[nearest_idx]), 3),
+        "missM": round(float(perp[nearest_idx]), 3),
+        "thresholdM": round(float(threshold[nearest_idx]), 3),
+        "score": round(float(np.min(nearest_score)), 3),
+    }
+
+    if not np.any(hit_mask):
+        return result
+
+    hit_indices = np.flatnonzero(hit_mask)
+    hit_idx = int(hit_indices[np.argmin(along[hit_indices])])
+    hit_point = pts[hit_idx]
+    point_kind = "lidar"
+    if cache.valid_object_mask.size == along.size and bool(cache.valid_object_mask[hit_idx]):
+        point_kind = "valid_object"
+    elif cache.obstacle_mask.size == along.size and bool(cache.obstacle_mask[hit_idx]):
+        point_kind = "obstacle"
+    elif cache.ground_mask.size == along.size and bool(cache.ground_mask[hit_idx]):
+        point_kind = "ground"
+
+    result.update({
+        "status": "hit",
+        "point": xyz_to_dict(hit_point),
+        "rangeM": round(float(along[hit_idx]), 3),
+        "missM": round(float(perp[hit_idx]), 3),
+        "thresholdM": round(float(threshold[hit_idx]), 3),
+        "pointKind": point_kind,
+        "lidarIndex": hit_idx,
+    })
+    return result
 
 
 def cleanup_ignored_candidates() -> None:
@@ -5133,7 +5899,16 @@ def select_nearest_candidate(cache: FrameCache) -> dict[str, Any] | None:
     # LiDAR clusters + fresh YOLO-fused objects are sorted nearest-first.  This
     # keeps the scan moving outward and allows flat-ground objects to be checked.
     scan_candidates = [json_copy(item) for item in cache.clusters] + yolo_fused_scan_candidates()
-    scan_candidates.sort(key=lambda item: (float(item.get("distanceM", 9999.0)), abs(float(item.get("angleDeg", 0.0)))))
+    if str(aim_settings.get("candidateSort", "tank_first_then_nearest")).strip().lower() == "tank_first_then_nearest":
+        scan_candidates.sort(
+            key=lambda item: (
+                0 if bool(item.get("tankLike", False)) else 1,
+                float(item.get("distanceM", 9999.0)),
+                abs(float(item.get("angleDeg", 0.0))),
+            )
+        )
+    else:
+        scan_candidates.sort(key=lambda item: (float(item.get("distanceM", 9999.0)), abs(float(item.get("angleDeg", 0.0)))))
     for candidate in scan_candidates:
         dist = float(candidate.get("distanceM", 9999.0))
         if not (min_dist <= dist <= max_dist):
@@ -5244,7 +6019,7 @@ def select_fresh_tank_candidate(cache: FrameCache) -> dict[str, Any] | None:
 
 
 def candidate_distance_for_aim(candidate: dict[str, Any]) -> float:
-    for key in ("horizontalRangeM", "surfaceDistanceM", "distanceM", "medianDistanceM"):
+    for key in ("hitboxCenterDistanceM", "horizontalRangeM", "surfaceDistanceM", "distanceM", "medianDistanceM"):
         value = safe_float(candidate.get(key), None)
         if value is not None and value > 0:
             return float(value)
@@ -5275,6 +6050,8 @@ def parse_pitch_sweep_offsets() -> list[float]:
 
 def candidate_is_yolo_tank_priority(candidate: dict[str, Any]) -> bool:
     if candidate.get("priorityYoloTank") is not None:
+        return True
+    if bool(candidate.get("tankLike", False)) and bool(aim_settings.get("fireOnLidarTankLike", True)):
         return True
     label = str(candidate.get("candidateLabel", "")).strip().lower()
     return label in {"ytank", "tank", "tank001"}
@@ -5373,17 +6150,35 @@ def build_seek_attack_action(cache: FrameCache, turret_state: dict[str, Any]) ->
     yolo_match = classify_selected_candidate_with_yolo(candidate)
     confirmed = None
     yolo_semantic = None
+    lidar_tank_like_confirmed = bool(
+        candidate.get("tankLike", False)
+        and aim_settings.get("fireOnLidarTankLike", True)
+    )
     if yolo_match is not None:
         yolo_semantic = str(yolo_match.get("semanticClass", yolo_match.get("originalSemanticClass", "")))
         raw_name = str(yolo_match.get("originalRawClassName", yolo_match.get("rawClassName", yolo_semantic)))
         is_tank = is_tank_semantic(yolo_semantic) or is_tank_semantic(raw_name)
         if is_tank:
             confirmed = json_copy(yolo_match)
+            lidar_tank_like_confirmed = False
         else:
+            lidar_tank_like_confirmed = False
             # This candidate was looked at and YOLO says it is not a tank; skip it briefly.
             mark_candidate_ignored(candidate, f"non_tank_yolo:{yolo_semantic}", now_t)
             for key in candidate_ignore_keys(candidate):
                 aim_state.setdefault("alignedSinceByKey", {}).pop(key, None)
+    elif lidar_tank_like_confirmed:
+        confirmed = {
+            "source": "lidar_tank_like",
+            "semanticClass": "enemy_tank",
+            "rawClassName": "LiDAR_TANK_LIKE",
+            "confidence": None,
+            "candidateKey": candidate_key(candidate),
+            "candidateLabel": candidate.get("candidateLabel"),
+            "tankLikeReason": candidate.get("tankLikeReason"),
+            "distanceM": candidate.get("distanceM"),
+            "angleDeg": candidate.get("angleDeg"),
+        }
 
     aligned = (
         abs(yaw_error) <= float(aim_settings.get("fireYawGateDeg", 1.5))
@@ -5427,7 +6222,7 @@ def build_seek_attack_action(cache: FrameCache, turret_state: dict[str, Any]) ->
     elif not bool(aim_settings.get("autoFireEnabled", True)):
         blocked_reason = "auto_fire_disabled"
     elif confirmed is None:
-        blocked_reason = f"not_confirmed_tank:{yolo_semantic or 'no_yolo'}"
+        blocked_reason = f"not_confirmed_tank:{yolo_semantic or 'no_yolo_or_lidar_tank_like'}"
     elif not aligned:
         blocked_reason = "not_aligned"
     else:
@@ -5481,6 +6276,8 @@ def build_seek_attack_action(cache: FrameCache, turret_state: dict[str, Any]) ->
                 "candidateIgnoreKeys": candidate_ignore_keys(candidate),
                 "selectionReason": candidate.get("selectionReason", "nearest_lidar_candidate"),
                 "yoloSemanticNearTarget": yolo_semantic,
+                "lidarTankLikeConfirmed": bool(lidar_tank_like_confirmed),
+                "fireOnLidarTankLike": bool(aim_settings.get("fireOnLidarTankLike", True)),
                 "aligned": aligned,
                 "noYoloDwellAgeSec": round(float(no_yolo_dwell_age_sec), 3) if no_yolo_dwell_age_sec is not None else None,
                 "skippedAfterNoYoloDwell": skipped_after_no_yolo_dwell,
@@ -5746,6 +6543,23 @@ def fire_targets():
     })
 
 
+@app.route("/impact_status", methods=["GET"])
+def impact_status():
+    with state_lock:
+        cache = latest_cache
+        turret_state = dict(latest_turret)
+        aim_snapshot = json_copy(aim_state)
+        fire_snapshot = json_copy(fire_state)
+    impact = estimate_barrel_impact(cache, turret_state)
+    return jsonify({
+        "status": "success",
+        "impact": impact,
+        "aim": aim_snapshot,
+        "fire": fire_snapshot,
+        "note": "Estimated from current barrel ray and nearest LiDAR return; not a full gravity/projectile simulation.",
+    })
+
+
 @app.route("/action_debug", methods=["GET"])
 def action_debug():
     with state_lock:
@@ -5805,7 +6619,7 @@ def aim_update():
         "ballisticPitchStartDistanceM": (0.0, 150.0),
         "ballisticPitchFullDistanceM": (1.0, 200.0),
     }
-    bool_keys = {"enabled", "autoFireEnabled", "fireOnTankCandidate", "tankPriorityEnabled", "skipNoYoloAfterDwell", "useCoarseIgnoreKey", "aimTargetSmoothingEnabled", "proportionalAimControl", "suppressReverseCommandNearLock", "flatObjectFallbackEnabled", "scanYoloFusedObjectsEnabled", "ballisticPitchCompEnabled", "pitchSweepEnabled", "pitchSweepOnlyConfirmedTank"}
+    bool_keys = {"enabled", "autoFireEnabled", "fireOnTankCandidate", "fireOnLidarTankLike", "tankPriorityEnabled", "skipNoYoloAfterDwell", "useCoarseIgnoreKey", "aimTargetSmoothingEnabled", "proportionalAimControl", "suppressReverseCommandNearLock", "flatObjectFallbackEnabled", "scanYoloFusedObjectsEnabled", "ballisticPitchCompEnabled", "pitchSweepEnabled", "pitchSweepOnlyConfirmedTank"}
     string_keys = {"yawRightCommand", "yawLeftCommand", "pitchUpCommand", "pitchDownCommand", "turretYawMode", "pitchSweepOffsetsDeg"}
     for key, (lo, hi) in numeric_ranges.items():
         if key in request.args:
@@ -5831,6 +6645,16 @@ def lidar_point_color(cache: FrameCache, idx: int) -> str:
     if cache.obstacle_mask.size and bool(cache.obstacle_mask[idx]):
         return "#ffd23f"
     return "#888888"
+
+
+def object_display_id(item: dict[str, Any]) -> str:
+    object_id = str(item.get("objectId") or "").strip()
+    if object_id:
+        return object_id
+    cluster_id = item.get("clusterId")
+    if cluster_id is not None:
+        return f"C-{cluster_id}"
+    return "OBJ"
 
 
 def svg_top_lidar(cache: FrameCache, aim_snapshot: dict[str, Any] | None = None, width: int = 980, height: int = 820) -> str:
@@ -5893,6 +6717,12 @@ def svg_top_lidar(cache: FrameCache, aim_snapshot: dict[str, Any] | None = None,
         h = safe_float(item.get("objectHeightAboveTerrainM"), None)
         pitch = safe_float(item.get("aimPitchDeg"), None)
         htxt = f" h{h:.1f}m" if h is not None else ""
+        obj_id = object_display_id(item)
+        badge_x = min(width - 112.0, max(8.0, x + 10.0))
+        badge_y = max(18.0, y - 20.0)
+        badge_w = max(58.0, 10.0 + len(obj_id) * 8.5)
+        parts.append(f"<rect x='{badge_x-4:.1f}' y='{badge_y-15:.1f}' width='{badge_w:.1f}' height='18' rx='3' fill='#050505' stroke='{color}' stroke-width='1.5'/>")
+        parts.append(f"<text x='{badge_x:.1f}' y='{badge_y-2:.1f}' fill='{color}' font-size='15' font-weight='700'>{html.escape(obj_id)}</text>")
         ptxt = f" p{pitch:+.1f}°" if pitch is not None else ""
         parts.append(f"<text x='{x+9:.1f}' y='{y-7:.1f}' fill='{color}' font-size='12'>{html.escape(str(item.get('candidateLabel','OBJ')))} {html.escape(str(item.get('objectId','')))} {dist:.1f}m {a:+.1f}°{htxt}{ptxt}</text>")
 
@@ -6484,7 +7314,13 @@ def gt_lidar_compare():
     return jsonify(result)
 
 
-def svg_world_lidar_objects(cache: FrameCache, aim_snapshot: dict[str, Any] | None = None, width: int = 980, height: int = 500) -> str:
+def svg_world_lidar_objects(
+    cache: FrameCache,
+    aim_snapshot: dict[str, Any] | None = None,
+    impact_snapshot: dict[str, Any] | None = None,
+    width: int = 980,
+    height: int = 500,
+) -> str:
     """World X/Z map view for object summaries, not raw point cloud transfer."""
     aim_snapshot = aim_snapshot or {}
     selected = aim_snapshot.get("selectedTarget") or {}
@@ -6500,6 +7336,15 @@ def svg_world_lidar_objects(cache: FrameCache, aim_snapshot: dict[str, Any] | No
 
     xs = [player_xz[0]] + [p[0] for p in object_points]
     zs = [player_xz[1]] + [p[1] for p in object_points]
+    impact_snapshot = impact_snapshot or {}
+    impact_point = extract_position_dict(impact_snapshot.get("point"))
+    impact_ray_end = extract_position_dict(impact_snapshot.get("rayEnd"))
+    if impact_point is not None:
+        xs.append(float(impact_point["x"]))
+        zs.append(float(impact_point["z"]))
+    if impact_ray_end is not None:
+        xs.append(float(impact_ray_end["x"]))
+        zs.append(float(impact_ray_end["z"]))
     pad = 15.0
     if len(xs) <= 1:
         min_x, max_x = player_xz[0] - 60.0, player_xz[0] + 60.0
@@ -6543,6 +7388,16 @@ def svg_world_lidar_objects(cache: FrameCache, aim_snapshot: dict[str, Any] | No
     parts.append(f"<line x1='{px:.1f}' y1='{py:.1f}' x2='{fx:.1f}' y2='{fy:.1f}' stroke='#00ffff' stroke-width='3'/>")
     parts.append(f"<text x='{px+10:.1f}' y='{py-10:.1f}' fill='#45d9ff' font-size='12'>PLAYER x:{player_xz[0]:.1f}, z:{player_xz[1]:.1f}</text>")
 
+    if impact_ray_end is not None:
+        rx, ry = sx(float(impact_ray_end["x"])), sy(float(impact_ray_end["z"]))
+        parts.append(f"<line x1='{px:.1f}' y1='{py:.1f}' x2='{rx:.1f}' y2='{ry:.1f}' stroke='#ff4df2' stroke-width='2.5' stroke-dasharray='8 5' opacity='0.85'/>")
+    if impact_point is not None:
+        ix, iy = sx(float(impact_point["x"])), sy(float(impact_point["z"]))
+        parts.append(f"<line x1='{ix-10:.1f}' y1='{iy-10:.1f}' x2='{ix+10:.1f}' y2='{iy+10:.1f}' stroke='#ff4df2' stroke-width='4'/>")
+        parts.append(f"<line x1='{ix-10:.1f}' y1='{iy+10:.1f}' x2='{ix+10:.1f}' y2='{iy-10:.1f}' stroke='#ff4df2' stroke-width='4'/>")
+        label = f"IMPACT {impact_snapshot.get('rangeM', '-')}m {impact_snapshot.get('pointKind', '')}"
+        parts.append(f"<text x='{ix+12:.1f}' y='{iy-12:.1f}' fill='#ffb3fb' font-size='13' font-weight='700'>{html.escape(label)}</text>")
+
     for x_val, z_val, item in object_points:
         x, y = sx(x_val), sy(z_val)
         key = str(item.get("candidateKey", ""))
@@ -6550,10 +7405,16 @@ def svg_world_lidar_objects(cache: FrameCache, aim_snapshot: dict[str, Any] | No
         color = '#00e5ff' if is_selected else '#ff4d4d'
         r = 11 if is_selected else 7
         parts.append(f"<circle cx='{x:.1f}' cy='{y:.1f}' r='{r}' fill='none' stroke='{color}' stroke-width='3'/>")
-        label = f"{item.get('candidateLabel','OBJ')} {item.get('objectId','')} x:{x_val:.1f} z:{z_val:.1f} d:{float(item.get('distanceM',0) or 0):.1f}m"
-        parts.append(f"<text x='{x+9:.1f}' y='{y-7:.1f}' fill='{color}' font-size='12'>{html.escape(label)}</text>")
+        obj_id = object_display_id(item)
+        badge_w = max(58.0, 10.0 + len(obj_id) * 8.5)
+        label_x = min(width - badge_w - 8.0, max(8.0, x + 9.0))
+        label_y = max(18.0, y - 12.0)
+        parts.append(f"<rect x='{label_x-4:.1f}' y='{label_y-15:.1f}' width='{badge_w:.1f}' height='18' rx='3' fill='#050505' stroke='{color}' stroke-width='1.5'/>")
+        parts.append(f"<text x='{label_x:.1f}' y='{label_y-2:.1f}' fill='{color}' font-size='15' font-weight='700'>{html.escape(obj_id)}</text>")
+        label = f"{item.get('candidateLabel','OBJ')} x:{x_val:.1f} z:{z_val:.1f} d:{float(item.get('distanceM',0) or 0):.1f}m"
+        parts.append(f"<text x='{label_x:.1f}' y='{label_y+13:.1f}' fill='{color}' font-size='11'>{html.escape(label)}</text>")
 
-    parts.append("<text x='12' y='20' fill='#eee' font-size='14'>World X/Z object map: circles are LiDAR object summaries; labels show world coordinates used for firing handoff.</text>")
+    parts.append("<text x='12' y='20' fill='#eee' font-size='14'>World X/Z object map: cyan=selected target, magenta=barrel ray / estimated impact.</text>")
     if not object_points:
         parts.append(f"<text x='{width/2:.1f}' y='{height/2:.1f}' fill='#aaa' font-size='16' text-anchor='middle'>No world-coordinate object cluster yet</text>")
     parts.append("</svg>")
@@ -6734,14 +7595,18 @@ def svg_front_object_silhouettes(
         center = cluster.get("surfaceCenterWorld") or cluster.get("worldCenter") or {}
         dist = safe_float(cluster.get("distanceM"), 0.0) or 0.0
         h = safe_float(cluster.get("objectHeightAboveTerrainM"), None)
-        label = f"{cluster.get('candidateLabel','OBJ')} {cluster.get('objectId','')} {key} d:{float(dist):.1f}m a:{float(angle):+.1f}°"
+        obj_id = object_display_id(cluster)
+        label = f"{obj_id} {cluster.get('candidateLabel','OBJ')} {key} d:{float(dist):.1f}m a:{float(angle):+.1f}°"
         if h is not None:
             label += f" h:{float(h):.1f}m"
         if isinstance(center, dict) and center.get('x') is not None and center.get('z') is not None:
             label += f" | x:{center.get('x')} z:{center.get('z')}"
         label_x = min(width - 12, max(margin_l + 4, x2 + 8))
         label_y = max(margin_t + 14, y_top - 5)
-        parts.append(f"<text x='{label_x:.1f}' y='{label_y:.1f}' fill='{color}' font-size='12'>{html.escape(label)}</text>")
+        badge_w = max(58.0, 10.0 + len(obj_id) * 8.5)
+        parts.append(f"<rect x='{label_x-4:.1f}' y='{label_y-15:.1f}' width='{badge_w:.1f}' height='18' rx='3' fill='#050505' stroke='{color}' stroke-width='1.5'/>")
+        parts.append(f"<text x='{label_x:.1f}' y='{label_y-2:.1f}' fill='{color}' font-size='15' font-weight='700'>{html.escape(obj_id)}</text>")
+        parts.append(f"<text x='{label_x:.1f}' y='{label_y+13:.1f}' fill='{color}' font-size='11'>{html.escape(label)}</text>")
         drawn_count += 1
 
     parts.append("<text x='12' y='20' fill='#eee' font-size='14'>Front object silhouettes: LiDAR valid-object clusters only | X=body angle, Y=vertical LiDAR channel, display flipped to match camera, yellow cross=aim pitch</text>")
@@ -6815,10 +7680,14 @@ def svg_object_cluster_closeups(
         channel_count = int(np.unique(np.round(vertical_values, 4)).size)
         shape_label = str(cluster.get("candidateLabel", "OBSTACLE"))
         key_label = str(cluster.get("candidateKey", ""))
-        label = html.escape(f"{shape_label} {cluster.get('objectId','')} {key_label}")
+        obj_id = object_display_id(cluster)
+        label = html.escape(f"{shape_label} {key_label}")
         distance = safe_float(cluster.get("distanceM"), float(np.median(distance_values))) or 0.0
         panel_color = "#00e5ff" if bool(cluster.get("tankLike", False)) else "#ffae35"
-        parts.append(f"<text x='{ox+8:.1f}' y='{oy+17:.1f}' fill='{panel_color}' font-size='13'>{label} | {distance:.1f}m | pts {idx.size} | channels {channel_count}</text>")
+        badge_w = max(58.0, 10.0 + len(obj_id) * 8.5)
+        parts.append(f"<rect x='{ox+6:.1f}' y='{oy+4:.1f}' width='{badge_w:.1f}' height='18' rx='3' fill='#050505' stroke='{panel_color}' stroke-width='1.5'/>")
+        parts.append(f"<text x='{ox+10:.1f}' y='{oy+18:.1f}' fill='{panel_color}' font-size='15' font-weight='700'>{html.escape(obj_id)}</text>")
+        parts.append(f"<text x='{ox+badge_w+14:.1f}' y='{oy+17:.1f}' fill='{panel_color}' font-size='12'>{label} | {distance:.1f}m | pts {idx.size} | channels {channel_count}</text>")
         parts.append(f"<text x='{ox+8:.1f}' y='{oy+33:.1f}' fill='#aaa' font-size='11'>angle {min_a:+.1f}..{max_a:+.1f}° | vertical {min_v:+.1f}..{max_v:+.1f}°</text>")
 
         for i in idx.tolist():
@@ -6895,7 +7764,7 @@ def svg_side_profile(cache: FrameCache, width: int = 820, height: int = 360) -> 
     return "".join(parts)
 
 
-def lidar_view_snapshot() -> tuple[FrameCache, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+def lidar_view_snapshot() -> tuple[FrameCache, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     with state_lock:
         cache = latest_cache
         aim_snapshot = json_copy(aim_state)
@@ -6904,7 +7773,8 @@ def lidar_view_snapshot() -> tuple[FrameCache, dict[str, Any], dict[str, Any], d
         fusion_snapshot = dict(fusion_settings)
         turret_state = dict(latest_turret)
     fire_targets_snapshot = build_fire_team_targets(cache, turret_state, tank_only=True, max_targets=8)
-    return cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot
+    impact_snapshot = estimate_barrel_impact(cache, turret_state)
+    return cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot, impact_snapshot
 
 
 
@@ -6977,6 +7847,7 @@ def render_lidar_view_body(
     yolo_snapshot: dict[str, Any],
     fusion_snapshot: dict[str, Any],
     fire_targets_snapshot: list[dict[str, Any]],
+    impact_snapshot: dict[str, Any],
     include_map_switcher: bool = False,
 ) -> str:
     rows = []
@@ -6987,6 +7858,7 @@ def render_lidar_view_body(
         aim_world = item.get("aimPointWorld") or {}
         rows.append(
             f"<tr class='{ 'sel' if is_sel else '' }'>"
+            f"<td class='idcell'>{html.escape(object_display_id(item))}</td>"
             f"<td>{html.escape(str(item.get('candidateKey')))}</td>"
             f"<td>{html.escape(str(item.get('candidateLabel')))}</td>"
             f"<td>{float(item.get('distanceM', 0)):.1f}</td>"
@@ -7002,10 +7874,11 @@ def render_lidar_view_body(
             f"<td>{item.get('objectTopYWorldM', '-')}</td>"
             f"<td>{item.get('depthSpanM', '-')}</td>"
             f"<td>{item.get('verticalityRatio', '-')}</td>"
+            f"<td>{html.escape(str(item.get('tankLikeReason') or '-'))}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append("<tr><td colspan='19'>No object-above-hill LiDAR clusters yet.</td></tr>")
+        rows.append("<tr><td colspan='21'>No object-above-hill LiDAR clusters yet.</td></tr>")
 
     target_rows = []
     for target in fire_targets_snapshot:
@@ -7051,11 +7924,26 @@ def render_lidar_view_body(
         if player_position is not None
         else "not received"
     )
+    impact_point = impact_snapshot.get("point") or {}
+    nearest_miss = impact_snapshot.get("nearestMiss") or {}
+    impact_text = (
+        f"status={impact_snapshot.get('status')} / "
+        f"kind={impact_snapshot.get('pointKind', '-')} / "
+        f"range={impact_snapshot.get('rangeM', '-')}m / "
+        f"miss={impact_snapshot.get('missM', '-')}m / "
+        f"x={impact_point.get('x', '-')} y={impact_point.get('y', '-')} z={impact_point.get('z', '-')}"
+    )
+    if impact_snapshot.get("status") != "hit" and nearest_miss:
+        miss_point = nearest_miss.get("point") or {}
+        impact_text += (
+            f" / nearest miss={nearest_miss.get('missM', '-')}m"
+            f" at x={miss_point.get('x', '-')} z={miss_point.get('z', '-')}"
+        )
     return f"""
 <h1>LiDAR object scan + world-coordinate fire handoff + GT compare v16.16</h1>
 <div class='muted'>Live panel updates with fetch(); the whole browser page is not meta-refreshed anymore.</div>
 <div>{svg_top_lidar(cache, aim_snapshot)}</div>
-<div>{svg_world_lidar_objects(cache, aim_snapshot)}</div>
+<div>{svg_world_lidar_objects(cache, aim_snapshot, impact_snapshot)}</div>
 <div>{svg_world_gt_lidar_compare(gt_compare, cache)}</div>
 <div class='grid'>
 <div>{svg_front_lidar(cache)}</div>
@@ -7073,6 +7961,7 @@ def render_lidar_view_body(
 <b>YOLO:</b> model={html.escape(str(fusion_snapshot.get('modelPath')))} / loaded={yolo_snapshot.get('modelLoaded')} / names={html.escape(str(names))} / conf={fusion_snapshot.get('confidence')} / iou={fusion_snapshot.get('iou')} / imgsz={fusion_snapshot.get('imageSize')} / max_det={fusion_snapshot.get('maxDetections')} / augment={fusion_snapshot.get('augment')}<br>
 <b>Aim:</b> mode={aim_snapshot.get('mode')} / yawErr={aim_snapshot.get('yawErrorDeg')} / pitchErr={aim_snapshot.get('pitchErrorDeg')}<br>
 <b>Fire:</b> count={fire_snapshot.get('fireCount')} / blocked={fire_snapshot.get('lastBlockedReason')}<br>
+<b>Impact estimate:</b> {html.escape(impact_text)}<br>
 <b>YOLO debug:</b> submitted={yolo_snapshot.get('submittedCount')} / completed={yolo_snapshot.get('completedCount')} / failed={yolo_snapshot.get('failedCount')} / det={len(yolo_snapshot.get('latestYoloDetections', []))} / fused={len(yolo_snapshot.get('latestFusedObjects', []))} / error={html.escape(str(yolo_snapshot.get('modelLoadError')))}
 </div>
 <div class='card'>
@@ -7090,7 +7979,7 @@ def render_lidar_view_body(
 <code>GET /gt_lidar_compare</code> returns this comparison as JSON. <code>GET /map_auto_best</code> scores every local .map and loads the best one.
 </div>
 <h2>LiDAR object clusters with world coordinates</h2>
-<table><thead><tr><th>key</th><th>type</th><th>distance m</th><th>angle deg</th><th>pitch deg</th><th>points</th><th>height span m</th><th>obj above hill m</th><th>surface dist m</th><th>center x</th><th>center y</th><th>center z</th><th>aim x</th><th>aim y</th><th>aim z</th><th>terrain Y</th><th>top Y</th><th>depth span m</th><th>verticality</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
+<table><thead><tr><th>ID</th><th>key</th><th>type</th><th>distance m</th><th>angle deg</th><th>pitch deg</th><th>points</th><th>height span m</th><th>obj above hill m</th><th>surface dist m</th><th>center x</th><th>center y</th><th>center z</th><th>aim x</th><th>aim y</th><th>aim z</th><th>terrain Y</th><th>top Y</th><th>depth span m</th><th>verticality</th><th>tank reason</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
 <div class='card'>
 <b>Links:</b>
 <a href='/fire_targets'>fire_targets</a> |
@@ -7120,9 +8009,9 @@ def lidar_view_fragment():
         load_map_ground_truth(filename=map_name, clear_existing=True, persist_selection=True)
         with state_lock:
             map_cycle_settings["enabled"] = False
-    cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot = lidar_view_snapshot()
+    cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot, impact_snapshot = lidar_view_snapshot()
     response = app.response_class(
-        render_lidar_view_body(cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot, include_map_switcher=False),
+        render_lidar_view_body(cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot, impact_snapshot, include_map_switcher=False),
         mimetype="text/html",
     )
     response.headers["Cache-Control"] = "no-store"
@@ -7137,8 +8026,8 @@ def lidar_view():
         load_map_ground_truth(filename=map_name, clear_existing=True, persist_selection=True)
         with state_lock:
             map_cycle_settings["enabled"] = False
-    cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot = lidar_view_snapshot()
-    body = render_lidar_view_body(cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot, include_map_switcher=False)
+    cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot, impact_snapshot = lidar_view_snapshot()
+    body = render_lidar_view_body(cache, aim_snapshot, fire_snapshot, yolo_snapshot, fusion_snapshot, fire_targets_snapshot, impact_snapshot, include_map_switcher=False)
     controls = render_map_switcher_controls()
     page = f"""<!doctype html>
 <html><head><meta charset='utf-8'>
@@ -7150,6 +8039,7 @@ h1 {{ margin: 0 0 8px 0; }} h2 {{ margin: 12px 0 6px 0; }}
 .card {{ background:#1d1d1d; border:1px solid #444; padding:10px; margin:10px 0; }}
 table {{ border-collapse:collapse; width:100%; font-size:12px; }} th,td {{ border:1px solid #555; padding:5px; text-align:right; }}
 th:first-child,td:first-child, th:nth-child(2),td:nth-child(2) {{ text-align:left; }} .sel {{ background:#3a3000; color:#ffd34d; }}
+.idcell {{ color:#7ff7ff; font-weight:700; font-size:13px; letter-spacing:0; }}
 .good {{ color:#6fe36f; }} .warn {{ color:#ffce54; }} .bad {{ color:#ff7777; }} .muted {{ color:#aaa; font-size:12px; margin-bottom:6px; }}
 .chart {{ width:100%; max-height:360px; }} .frontobjectchart {{ max-height:520px; }} .closeupchart {{ max-height:none; }} .topchart {{ max-height:820px; }} .worldchart {{ max-height:500px; }} .gtchart {{ max-height:560px; }} code {{ color:#9cdcfe; }} a {{ color:#8cc8ff; }}
 .sticky-switcher {{ position: sticky; top: 0; z-index: 30; box-shadow: 0 4px 12px rgba(0,0,0,0.35); }}
@@ -7525,6 +8415,12 @@ def calibration_update():
         "latestActionFreshnessSec": (0.05, 5.0),
         "tiltSmoothingAlpha": (0.01, 1.0),
         "maxGroundTiltDeg": (0.0, 45.0),
+        "maxBodyTiltDeg": (0.0, 60.0),
+        "bodyTiltPitchSign": (-1.0, 1.0),
+        "bodyTiltRollSign": (-1.0, 1.0),
+        "bodyTiltPitchOffsetDeg": (-45.0, 45.0),
+        "bodyTiltRollOffsetDeg": (-45.0, 45.0),
+        "bodyGroundNormalBlend": (0.0, 1.0),
         "rollOffsetDeg": (-45.0, 45.0),
     }
     for key, (minimum, maximum) in numeric_fields.items():
@@ -7545,9 +8441,15 @@ def calibration_update():
             calibration["cameraPoseMode"] = value
 
     if "tiltCompensationMode" in request.args:
-        value = str(request.args.get("tiltCompensationMode", "ground_plane")).strip().lower()
-        if value in {"off", "ground_plane"}:
+        value = str(request.args.get("tiltCompensationMode", "body_pose_blend_ground_plane")).strip().lower()
+        if value in {"off", "ground_plane", "body_pose", "body_pose_or_ground_plane", "body_pose_blend_ground_plane"}:
             calibration["tiltCompensationMode"] = value
+
+    for key in {"bodyTiltYawField", "bodyTiltPitchField", "bodyTiltRollField"}:
+        if key in request.args:
+            value = str(request.args.get(key, "")).strip()
+            if value:
+                calibration[key] = value
 
     return jsonify({"status": "success", "calibration": dict(calibration)})
 
@@ -7563,6 +8465,10 @@ def overlay_update():
         "objectPointRadiusPx": (1, 12),
         "clusterBoxLimit": (0, 80),
         "clusterBoxMinPoints": (1, 20),
+        "approxMapHitboxLimit": (0, 300),
+        "approxMapHitboxPointLimit": (0, 6000),
+        "approxMapHitboxEdgePointRadiusPx": (1, 8),
+        "approxMapHitboxCenterRadiusPx": (1, 14),
     }
     for key, (minimum, maximum) in integer_fields.items():
         if key not in request.args:
@@ -7574,6 +8480,15 @@ def overlay_update():
     float_fields = {
         "clusterBoxAngleGateDeg": (0.5, 30.0),
         "clusterBoxDistanceGateM": (0.5, 30.0),
+        "approxMapHitboxEdgeStepM": (0.05, 2.0),
+        "approxMapHitboxYawSign": (-1.0, 1.0),
+        "approxMapHitboxYawOffsetDeg": (-180.0, 180.0),
+        "approxTankHitboxSizeX_M": (0.5, 8.0),
+        "approxTankHitboxSizeY_M": (0.5, 5.0),
+        "approxTankHitboxSizeZ_M": (1.0, 12.0),
+        "approxTankHitboxCenterX_M": (-3.0, 3.0),
+        "approxTankHitboxCenterY_M": (-2.0, 4.0),
+        "approxTankHitboxCenterZ_M": (-3.0, 3.0),
     }
     for key, (minimum, maximum) in float_fields.items():
         if key not in request.args:
@@ -7582,7 +8497,14 @@ def overlay_update():
         if value is not None:
             overlay_settings[key] = float(max(minimum, min(maximum, value)))
 
-    for key in {"showLidarPoints", "showSafeGround", "showLidarClusterBoxes"}:
+    for key in {
+        "showLidarPoints",
+        "showSafeGround",
+        "showLidarClusterBoxes",
+        "showApproxMapHitbox",
+        "approxMapHitboxFallbackToLidarTankLike",
+        "showLidarTankLikeHitbox",
+    }:
         if key in request.args:
             overlay_settings[key] = str(request.args.get(key)).strip().lower() in {
                 "1", "true", "yes", "on"
@@ -7597,6 +8519,22 @@ def overlay_update():
             "all_obstacles",
         }:
             overlay_settings["simLidarPointMode"] = mode
+
+    if "approxMapHitboxTarget" in request.args:
+        target = str(request.args.get("approxMapHitboxTarget", "enemy_tank_only")).strip().lower()
+        if target in {"enemy_tank_only", "tank_only", "tank", "all", "any", "*"}:
+            overlay_settings["approxMapHitboxTarget"] = target
+
+    if "approxMapHitboxPivotMode" in request.args:
+        mode = str(request.args.get("approxMapHitboxPivotMode", "profile_center")).strip().lower()
+        if mode in {"profile_center", "bottom_center", "center"}:
+            overlay_settings["approxMapHitboxPivotMode"] = mode
+
+    for key in {"approxMapHitboxColor", "approxMapHitboxCenterColor"}:
+        if key in request.args:
+            value = str(request.args.get(key, "")).strip()
+            if value:
+                overlay_settings[key] = value[:32]
 
     return jsonify({"status": "success", "overlay": dict(overlay_settings)})
 
@@ -7724,6 +8662,13 @@ def fusion_update():
         "tankRescueMinRoiPoints": (1, 100),
         "tankRescueMinBoxAspectRatio": (0.1, 10.0),
         "yoloOnlyHintAngleGateDeg": (1.0, 45.0),
+        "tankHitboxLengthM": (1.0, 12.0),
+        "tankHitboxWidthM": (0.5, 8.0),
+        "tankHitboxHeightM": (0.5, 5.0),
+        "tankLengthM": (1.0, 12.0),
+        "tankWidthM": (0.5, 8.0),
+        "tankDepthMinVisibleWidthM": (0.1, 8.0),
+        "tankDepthMaxVisibleWidthPadM": (0.0, 4.0),
     }
     for key, (minimum, maximum) in numeric_fields.items():
         if key not in request.args:
@@ -7746,6 +8691,7 @@ def fusion_update():
         "showUnmatchedYoloBoxes",
         "halfPrecisionAuto",
         "tankCandidateRescueEnabled",
+        "tankUseHitboxProfileForCenter",
         "showYoloOnlyAngleLabel",
         "showYoloOnlyLidarHint",
     }:
@@ -7769,6 +8715,11 @@ def fusion_update():
         fusion_settings["tankCandidateSourceClasses"] = str(
             request.args.get("tankCandidateSourceClasses", "car2")
         ).strip()[:200]
+
+    if "tankDepthModel" in request.args:
+        value = str(request.args.get("tankDepthModel", "continuous_visible_width")).strip().lower()
+        if value in {"continuous_visible_width", "bbox_step"}:
+            fusion_settings["tankDepthModel"] = value
 
     return jsonify({"status": "success", "fusion": dict(fusion_settings)})
 

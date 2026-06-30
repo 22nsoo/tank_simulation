@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TankChallenge RAG Decision Support</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">TankChallenge Portfolio MVP</p>
+      <h1>RAG Decision Support Dashboard</h1>
+    </div>
+    <div class="status-pill {{ 'hold' if not result.recommendation.fire else 'fire' }}">
+      {{ 'FIRE' if result.recommendation.fire else 'HOLD / CORRECT' }}
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel input-panel">
+      <div class="section-head">
+        <h2>Current Situation</h2>
+        <span>Top-k retrieval query</span>
+      </div>
+
+      <form method="post" action="{{ url_for('query') }}" class="query-form">
+        <label>
+          Search backend
+          <select name="backend">
+            <option value="faiss" {{ 'selected' if result.backend == 'faiss' else '' }}>Hugging Face + FAISS Vector Search</option>
+            <option value="chroma" {{ 'selected' if result.backend == 'chroma' else '' }}>Hugging Face + ChromaDB Vector Store</option>
+            <option value="hybrid" {{ 'selected' if result.backend == 'hybrid' else '' }}>Numeric/Text Hybrid Baseline</option>
+          </select>
+        </label>
+
+        <label>
+          Target type
+          <select name="target_type">
+            <option value="moving_enemy" {{ 'selected' if result.query.target_type == 'moving_enemy' else '' }}>Moving target</option>
+            <option value="stationary" {{ 'selected' if result.query.target_type == 'stationary' else '' }}>Stationary target</option>
+          </select>
+        </label>
+
+        <label>
+          Distance (m)
+          <input type="number" step="0.01" name="distance" value="{{ result.query.distance }}">
+        </label>
+
+        <label>
+          Body yaw error (deg)
+          <input type="number" step="0.01" name="body_error" value="{{ result.query.body_error }}">
+        </label>
+
+        <label>
+          Turret yaw error (deg)
+          <input type="number" step="0.01" name="turret_error" value="{{ result.query.turret_error }}">
+        </label>
+
+        <label>
+          Pitch error (deg)
+          <input type="number" step="0.01" name="pitch_error" value="{{ result.query.pitch_error }}">
+        </label>
+
+        <label>
+          Enemy speed (m/s)
+          <input type="number" step="0.01" name="enemy_speed" value="{{ result.query.enemy_speed }}">
+        </label>
+
+        <label>
+          Lead distance (m)
+          <input type="number" step="0.01" name="lead_distance" value="{{ result.query.lead_distance }}">
+        </label>
+
+        <label>
+          Retrieved cases
+          <input type="number" min="1" max="12" name="top_k" value="{{ result.matches|length }}">
+        </label>
+
+        <button type="submit">Run Recommendation</button>
+      </form>
+    </section>
+
+    <section class="panel recommendation-panel">
+      <div class="section-head">
+        <h2>Recommendation</h2>
+        <span>Evidence-based retrieval decision</span>
+      </div>
+
+      <div class="decision {{ 'fire' if result.recommendation.fire else 'hold' }}">
+        <strong>{{ 'Fire recommended' if result.recommendation.fire else 'Hold fire and correct aim' }}</strong>
+        <p>{{ result.recommendation.summary }}</p>
+      </div>
+
+      <div class="metrics-grid">
+        <div>
+          <span>Similar success rate</span>
+          <strong>{{ '%.0f%%'|format(result.recommendation.confidence * 100) }}</strong>
+        </div>
+        <div>
+          <span>Yaw correction</span>
+          <strong>{{ '%+.2f'|format(result.recommendation.yaw_correction_deg) }} deg</strong>
+        </div>
+        <div>
+          <span>Pitch correction</span>
+          <strong>{{ '%+.2f'|format(result.recommendation.pitch_correction_deg) }} deg</strong>
+        </div>
+      </div>
+
+      <div class="dataset-strip">
+        <div>
+          <span>Backend</span>
+          <strong class="backend-name">{{ result.backend|upper }}</strong>
+        </div>
+        <div>
+          <span>Indexed</span>
+          <strong>{{ metrics.case_count }}</strong>
+        </div>
+        <div>
+          <span>Success</span>
+          <strong>{{ metrics.success_cases }}</strong>
+        </div>
+        <div>
+          <span>Failure</span>
+          <strong>{{ metrics.failure_cases }}</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel quality-panel">
+      <div class="section-head">
+        <h2>Retrieval Quality</h2>
+        <span>Top-k diagnostics</span>
+      </div>
+
+      <div class="quality-grid">
+        <div>
+          <span>Top-k success/failure</span>
+          <strong>{{ result.quality.success_count }} / {{ result.quality.failure_count }}</strong>
+        </div>
+        <div>
+          <span>Avg impact error</span>
+          <strong>{{ '%.2f m'|format(result.quality.avg_impact_error) }}</strong>
+        </div>
+        <div>
+          <span>Avg success distance</span>
+          <strong>
+            {% if result.quality.avg_success_distance is not none %}
+              {{ '%.1f m'|format(result.quality.avg_success_distance) }}
+            {% else %}
+              N/A
+            {% endif %}
+          </strong>
+        </div>
+        <div>
+          <span>FAISS/Hybrid overlap</span>
+          <strong>{{ result.comparison.overlap_count }}</strong>
+        </div>
+      </div>
+
+      <div class="comparison-grid">
+        <div>
+          <h3>FAISS Vector Search</h3>
+          <p>Success {{ result.comparison.faiss.success_count }}, failure {{ result.comparison.faiss.failure_count }},
+             avg impact {{ '%.2f m'|format(result.comparison.faiss.avg_impact_error) }}</p>
+        </div>
+        <div>
+          <h3>ChromaDB Vector Store</h3>
+          <p>Success {{ result.comparison.chroma.success_count }}, failure {{ result.comparison.chroma.failure_count }},
+             avg impact {{ '%.2f m'|format(result.comparison.chroma.avg_impact_error) }}</p>
+        </div>
+        <div>
+          <h3>Hybrid Baseline</h3>
+          <p>Success {{ result.comparison.hybrid.success_count }}, failure {{ result.comparison.hybrid.failure_count }},
+             avg impact {{ '%.2f m'|format(result.comparison.hybrid.avg_impact_error) }}</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel cases-panel">
+      <div class="section-head">
+        <h2>Retrieved Similar Cases</h2>
+        <span>{{ result.matches|length }} cases</span>
+      </div>
+
+      <div class="case-list">
+        {% for match in result.matches %}
+        <article class="case-card {{ match.hit_label }}">
+          <div class="case-head">
+            <div>
+              <strong>{{ match.case_id }}</strong>
+              <span>{{ match.source }}</span>
+            </div>
+            <div class="score">{{ '%.3f'|format(match.score) }}</div>
+          </div>
+
+          <div class="case-stats">
+            <span>{{ match.hit_label }}</span>
+            <span>{{ '%.1f'|format(match.distance or 0) }}m</span>
+            <span>yaw {{ '%+.2f'|format(match.turret_error or 0) }} deg</span>
+            <span>pitch {{ '%+.2f'|format(match.pitch_error or 0) }} deg</span>
+            <span>impact {{ '%.2f'|format(match.impact_error or 0) }}m</span>
+          </div>
+
+          <p>{{ match.document }}</p>
+        </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel pca-panel">
+      <div class="section-head">
+        <h2>Interactive PCA Embedding Map</h2>
+        <span>384D embedding to 2D</span>
+      </div>
+      <div id="pcaPlot" class="plotly-panel"></div>
+      <img class="pca-image fallback-image" src="{{ url_for('static', filename='pca_embedding_map.png') }}" alt="PCA embedding map">
+    </section>
+  </main>
+
+  <script>
+    async function renderPcaPlot() {
+      const fallback = document.querySelector(".fallback-image");
+      const target = document.getElementById("pcaPlot");
+      if (!window.Plotly) {
+        target.style.display = "none";
+        fallback.style.display = "block";
+        return;
+      }
+
+      const response = await fetch("{{ url_for('api_pca_points') }}");
+      const payload = await response.json();
+      const points = payload.points || [];
+      const success = points.filter((point) => point.hit_label === "success");
+      const failure = points.filter((point) => point.hit_label !== "success");
+
+      function trace(name, rows, color) {
+        return {
+          type: "scatter",
+          mode: "markers",
+          name,
+          x: rows.map((row) => row.pca_x),
+          y: rows.map((row) => row.pca_y),
+          text: rows.map((row) => row.case_id),
+          customdata: rows.map((row) => [
+            row.hit_label,
+            row.target_type,
+            row.distance,
+            row.impact_error,
+            row.source,
+          ]),
+          hovertemplate:
+            "<b>%{text}</b><br>" +
+            "label: %{customdata[0]}<br>" +
+            "target: %{customdata[1]}<br>" +
+            "distance: %{customdata[2]:.1f}m<br>" +
+            "impact error: %{customdata[3]:.2f}m<br>" +
+            "source: %{customdata[4]}<extra></extra>",
+          marker: {
+            size: 10,
+            color,
+            opacity: 0.82,
+            line: { color: "#ffffff", width: 1 },
+          },
+        };
+      }
+
+      Plotly.newPlot(
+        target,
+        [
+          trace("success", success, "#0b7a53"),
+          trace("failure", failure, "#b3261e"),
+        ],
+        {
+          margin: { l: 48, r: 24, t: 24, b: 48 },
+          paper_bgcolor: "#ffffff",
+          plot_bgcolor: "#ffffff",
+          xaxis: { title: "PC1", gridcolor: "#d9e0ea" },
+          yaxis: { title: "PC2", gridcolor: "#d9e0ea" },
+          legend: { orientation: "h" },
+        },
+        { responsive: true, displaylogo: false }
+      );
+
+      fallback.style.display = "none";
+    }
+
+    renderPcaPlot();
+  </script>
+</body>
+</html>

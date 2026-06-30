@@ -1,0 +1,21 @@
+# Python cache/runtime artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Local logs and temporary files
+*.log
+*.tmp
+
+# Generated RAG/vector-search artifacts
+rag_decision_support/faiss_cases.index
+rag_decision_support/faiss_cases_meta.json
+rag_decision_support/chroma_store/
+rag_decision_support/case_index.jsonl
+rag_decision_support/pca_embedding_points.csv
+
