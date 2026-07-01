@@ -1,370 +1,386 @@
-# TankChallenge RAG 의사결정 지원 시스템
+# TankChallenge RAG Decision Support
 
-TankChallenge 전투/발사 로그를 기반으로 현재 상황과 유사한 과거 명중/실패 사례를 검색하고, 발사 여부와 조준 보정값을 추천하는 RAG 기반 의사결정 지원 시스템입니다.
+TankChallenge shot logs and live LiDAR/YOLO battlefield context are used as RAG evidence for fire-control support.
 
-본 프로젝트는 단순 규칙 기반 제어가 아니라, 실제 전투 로그를 자연어 사례 문서로 변환하고 Hugging Face SentenceTransformer로 임베딩한 뒤 FAISS와 ChromaDB에서 유사 사례를 검색하는 구조를 갖습니다.
+The system retrieves similar historical shot cases, optionally retrieves the latest live tactical snapshot from ChromaDB, and uses an LLM to produce FIRE/HOLD recommendations and Korean chatbot answers. If the LLM is unavailable, it falls back to the deterministic rule-based recommender.
 
-## 핵심 기능
+## What It Does
 
-- TankChallenge CSV 발사 로그 기반 전투 사례 데이터셋 구축
-- 발사 상황을 자연어 문서 형태로 변환
-- Hugging Face SentenceTransformer 기반 임베딩 생성
-- FAISS 기반 고속 벡터 검색
-- ChromaDB 기반 영속 VectorDB 저장소 구성
-- 현재 상황과 유사한 Top-k 과거 사례 검색
-- 유사 사례의 명중/실패 분포 기반 발사 여부 추천
-- yaw/pitch 조준 보정값 추천
-- 성공 사례 weighted average 기반 보정
-- 실패 사례 오차 방향을 반영한 보정값 보수화
-- 거리 bucket별 조준 보정 및 confidence threshold 적용
-- moving/stationary 표적 유형별 분리 threshold 적용
-- 검색 품질 평가 지표 제공
-- PCA 기반 임베딩 분포 시각화
-- PCA 이미지와 검색 예시가 포함된 제출용 리포트 자동 생성
-- Flask 웹 대시보드 및 JSON API 제공
-- 기존 TankChallenge 서버 상태 API와 연동 가능한 live-query bridge 제공
+- Builds shot-case documents from `shot_analysis/shot_log_*.csv`
+- Builds moving-target shot cases from `shot_analysis/moving_target_logs/*.csv`
+- Searches similar historical cases with FAISS, ChromaDB, or numeric/text hybrid search
+- Uses `tank_rag_llm.py` for LLM-based FIRE/HOLD decisions
+- Provides a dashboard and JSON APIs from `app.py`
+- Adds a RAG chat panel for Korean tactical Q&A
+- Reads live LiDAR/YOLO server state from `http://127.0.0.1:5000`
+- Stores the latest battlefield snapshot in ChromaDB collection `tank_tactical_context`
+- Uses live tactical context for enemy count, nearest enemy, obstacle, and line-of-fire questions
+- Produces a high-level drive/fire action recommendation from RAG + live tactical context
+- Runs a local drive planner for movement actions, including waypoint following, PD steering, clearance stop, TTC stop, and replan signaling
 
-## 전체 구조
-
-```text
-shot_analysis/*.csv
-shot_analysis/moving_target_logs/*.csv
-        |
-        v
-CSV 로그 파싱
-        |
-        v
-자연어 전투 사례 문서 생성
-        |
-        v
-SentenceTransformer 임베딩 생성
-        |
-        +--------------------+
-        |                    |
-        v                    v
-   FAISS Index          ChromaDB Store
-        |                    |
-        +---------+----------+
-                  |
-                  v
-          현재 상황 Query 입력
-                  |
-                  v
-      유사한 과거 명중/실패 사례 Top-k 검색
-                  |
-                  v
-      발사/보류 판단 + yaw/pitch 보정 추천
-```
-
-## 사용 기술
-
-- Python
-- Flask
-- Hugging Face `sentence-transformers`
-- FAISS `faiss-cpu`
-- ChromaDB
-- scikit-learn PCA
-- Matplotlib
-- Plotly
-- HTML/CSS
-
-기본 임베딩 모델:
-
-```text
-sentence-transformers/all-MiniLM-L6-v2
-```
-
-지원 검색 방식:
-
-```text
-faiss   - Hugging Face 임베딩 + FAISS 벡터 검색
-chroma  - Hugging Face 임베딩 + ChromaDB VectorDB 검색
-hybrid  - 숫자 특징/텍스트 유사도 기반 baseline 검색
-```
-
-## 파일 구성
+## Main Files
 
 ```text
 rag_decision_support/
-  app.py                         # Flask 웹 대시보드 및 API
-  tank_rag.py                    # 로그 파싱, 임베딩, 검색, 추천 로직
-  pca_visualize.py               # PCA 시각화 생성 스크립트
-  case_index.jsonl               # 자연어 전투 사례 인덱스
-  faiss_cases.index              # FAISS 벡터 인덱스
-  faiss_cases_meta.json          # FAISS 메타데이터 및 원본 사례
-  chroma_store/                  # ChromaDB 영속 벡터 저장소
-  pca_embedding_points.csv       # PCA 2차원 좌표 데이터
-  rag_report.md                  # 평가/분석 리포트
-  templates/index.html           # 웹 대시보드 템플릿
-  static/styles.css              # 웹 대시보드 스타일
-  static/pca_embedding_map.png   # PCA 정적 이미지 fallback
+  app.py                    Flask dashboard and API
+  tank_rag.py               Base RAG search and rule recommender
+  tank_rag_llm.py           LLM decision mode and chatbot prompts
+  tactical_context.py       Live LiDAR/YOLO tactical context -> ChromaDB
+  drive_planner.py          Local waypoint/TTC/clearance drive planner
+  world_map.py              300x300 .map parser for dashboard rendering
+  pca_visualize.py          Embedding PCA visualization
+  case_index.jsonl          Shot-case JSONL index
+  faiss_cases.index         FAISS vector index
+  faiss_cases_meta.json     FAISS metadata and case payloads
+  chroma_store/             ChromaDB persistent storage
+  templates/index.html      Dashboard UI
+  static/styles.css         Dashboard styling
 ```
 
-## 설치
+## Data Flow
 
-프로젝트 루트에서 실행합니다.
+```text
+Shot CSV logs
+  -> ShotCase documents
+  -> SentenceTransformer embeddings
+  -> FAISS / ChromaDB historical retrieval
+
+Live lidar_cluster.py server on port 5000
+  -> fire_status / lidar_status / vision_status / fusion_status / aim_status
+  -> tactical context summary
+  -> ChromaDB collection: tank_tactical_context
+
+Current query + historical cases + live tactical context
+  -> LLM recommendation or Korean chatbot answer
+  -> drive/fire action recommendation
+  -> local drive planner command for movement actions
+  -> rule fallback if LLM/API key is unavailable
+```
+
+## Install
+
+From the project root:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-주요 필요 패키지:
+Main dependencies:
 
 ```text
 flask
 sentence-transformers
 faiss-cpu
 chromadb
+google-generativeai
 matplotlib
 scikit-learn
 ```
 
-## 인덱스 생성 순서
+## Build Indexes
 
-프로젝트 루트에서 실행합니다.
+Run from the project root:
 
 ```powershell
 python rag_decision_support\tank_rag.py build
 python rag_decision_support\tank_rag.py build-embeddings
 python rag_decision_support\tank_rag.py build-chroma
 python rag_decision_support\pca_visualize.py
-python rag_decision_support\tank_rag.py report --backend faiss
 ```
 
-각 명령의 의미:
-
-```text
-build             CSV 로그를 읽어 case_index.jsonl 생성
-build-embeddings  SentenceTransformer 임베딩 및 FAISS 인덱스 생성
-build-chroma      ChromaDB 영속 벡터 저장소 생성
-pca_visualize.py  임베딩을 PCA로 2차원 축소하고 CSV/PNG 생성
-report            검색 성능 및 데이터셋 요약 리포트 생성
-```
-
-## CLI 질의 예시
-
-FAISS 기반 검색:
+## Run Dashboard
 
 ```powershell
-python rag_decision_support\tank_rag.py query --backend faiss --distance 85 --body-error 3 --turret-error 0.8 --pitch-error -0.1 --enemy-speed 0.4
+python rag_decision_support\app.py
 ```
 
-ChromaDB 기반 검색:
-
-```powershell
-python rag_decision_support\tank_rag.py query --backend chroma --distance 85 --body-error 3 --turret-error 0.8 --pitch-error -0.1 --enemy-speed 0.4
-```
-
-Hybrid baseline 검색:
-
-```powershell
-python rag_decision_support\tank_rag.py query --backend hybrid --distance 85 --body-error 3 --turret-error 0.8 --pitch-error -0.1 --enemy-speed 0.4
-```
-
-출력 예시:
-
-```json
-{
-  "backend": "faiss",
-  "recommendation": {
-    "fire": true,
-    "confidence": 1.0,
-    "summary": "Similar-case success rate is 100%. Recommendation: fire.",
-    "yaw_correction_deg": 0.242,
-    "pitch_correction_deg": 0.09
-  }
-}
-```
-
-## 웹 대시보드 실행
-
-```powershell
-cd rag_decision_support
-python .\app.py
-```
-
-브라우저 접속:
+Open:
 
 ```text
 http://127.0.0.1:5056
 ```
 
-대시보드 기능:
+The dashboard includes:
 
-- 현재 전투 상황 수동 입력
-- 검색 backend 선택: FAISS / ChromaDB / Hybrid baseline
-- 발사 권장 또는 발사 보류 판단 표시
-- yaw/pitch 조준 보정값 표시
-- 검색된 Top-k 유사 사례 표시
-- 검색 품질 평가 지표 표시
-- FAISS와 hybrid baseline 검색 결과 비교
-- Plotly 기반 인터랙티브 PCA 임베딩 시각화
-- Plotly CDN이 불가능할 경우 정적 PCA PNG fallback 표시
+- Current situation input form
+- FIRE/HOLD recommendation
+- Drive/fire action card with safe movement target
+- Local drive planner card with command, clearance, TTC, and replan state
+- 300x300 world-map panel with static obstacles, tank pose, safe target, and waypoints
+- Tactical top-down map
+- LiDAR body-relative polar view
+- RAG chat
+- Retrieval quality comparison
+- Retrieved similar cases
+- PCA embedding map
 
-## 검색 품질 평가 지표
+## LLM Setup
 
-각 질의마다 다음 지표를 제공합니다.
+Default mode: external LLM calls are allowed when `LLAMA_API_KEY` is set.
 
-```text
-Top-k success/failure 개수
-Top-k success rate
-검색된 사례의 평균 impact error
-성공 사례 평균 거리
-FAISS와 hybrid 검색 결과 overlap 개수
-FAISS 요약 지표와 hybrid 요약 지표 비교
-```
-
-이를 통해 단순히 RAG를 붙인 것이 아니라, 검색 결과의 품질을 평가하고 비교할 수 있습니다.
-
-## PCA 시각화
-
-384차원 임베딩을 PCA로 2차원 축소합니다.
+To block paid LLM calls explicitly:
 
 ```powershell
-python rag_decision_support\pca_visualize.py
+$env:TANK_RAG_ALLOW_PAID_LLM="false"
+python rag_decision_support\app.py
 ```
 
-생성 파일:
+Llama API mode:
+
+```powershell
+$env:LLAMA_API_KEY="YOUR_LLAMA_API_KEY"
+python rag_decision_support\app.py
+```
+
+Optional Llama settings:
 
 ```text
-rag_decision_support/pca_embedding_points.csv
-rag_decision_support/static/pca_embedding_map.png
+TANK_RAG_LLM_PROVIDER=llama
+TANK_RAG_LLAMA_MODEL=llama3.1-70b
+LLAMA_API_BASE_URL=https://api.llama-api.com
 ```
 
-웹 대시보드는 `pca_embedding_points.csv`를 읽어 Plotly 산점도를 렌더링합니다.
+Gemini is still available as an optional fallback provider:
 
-점에 마우스를 올리면 다음 정보를 볼 수 있습니다.
+```powershell
+$env:TANK_RAG_LLM_PROVIDER="gemini"
+$env:GEMINI_API_KEY="YOUR_KEY"
+python rag_decision_support\app.py
+```
+
+OpenAI support has been removed from this RAG app. If the selected LLM key, package, or provider call fails, the app returns a rule-based fallback result instead of crashing.
+
+## Live LiDAR/YOLO Tactical Context
+
+The RAG app can read live state from the integrated TankChallenge LiDAR/YOLO server in this folder.
+
+Expected live source:
 
 ```text
-case_id
-hit_label
-target_type
-distance
-impact_error
-source file
+http://127.0.0.1:5000
 ```
 
-현재 PCA 결과:
+The RAG app tries to read:
 
 ```text
-case_count: 116
-embedding_dimension: 384
-PC1 explained variance: 약 60.7%
-PC2 explained variance: 약 17.6%
-PC1 + PC2 total: 약 78.2%
+/fire_status
+/lidar_status
+/vision_status
+/fusion_status
+/aim_status
+/action_debug
 ```
 
-## API
+It summarizes and stores:
 
-메트릭 조회:
+- Enemy-like object count
+- Nearest enemy label, distance, and angle
+- Obstacle cluster count
+- Front-lane obstacle list
+- Whether the front lane appears blocked
+- Current fire/aim status fields
+
+The latest summary is upserted into ChromaDB:
 
 ```text
-GET /api/metrics
+collection: tank_tactical_context
+id: live_latest
 ```
 
-질의:
+If the 5000 server is off, tactical context returns `unavailable` and the app continues with historical shot-case RAG.
+
+For actual simulator actuation, run the integrated LiDAR/YOLO control server:
+
+```powershell
+python rag_decision_support\lidar_cluster.py
+```
+
+That server owns `/get_action`. It combines the LiDAR/YOLO perception stream with local waypoint/TTC/clearance driving through `rag_decision_support/integrated_control.py` and `shot_analysis/fire_logic.py` aiming/fire control. The RAG dashboard remains the decision/monitoring UI and reads the 5000 server state.
+
+## Tactical Context APIs
+
+Ingest latest live context:
+
+```text
+GET /api/tactical/ingest
+POST /api/tactical/ingest
+```
+
+Search tactical context:
+
+```text
+GET /api/tactical/search?q=front blocked
+GET /api/tactical/search?q=enemy count
+```
+
+Override live source:
+
+```text
+GET /api/tactical/ingest?source_base=http://127.0.0.1:5000
+```
+
+World map:
+
+```text
+GET /api/world-map
+GET /api/world-map?map_file=NewMap_120m_to_40m_4m_varied.map
+```
+
+The dashboard reads `.map` JSON files from the project root and renders them as a 300m x 300m world canvas. The panel overlays static map obstacles, the live player pose when available, the safe movement destination, and local planner waypoints.
+
+## Query APIs
+
+Recommendation:
 
 ```text
 GET /api/query?backend=faiss&distance=85&body_error=3&turret_error=0.8&pitch_error=-0.1&enemy_speed=0.4
-GET /api/query?backend=chroma&distance=85&body_error=3&turret_error=0.8&pitch_error=-0.1&enemy_speed=0.4
 ```
 
-PCA point 조회:
+Chat:
 
 ```text
-GET /api/pca-points
+POST /api/chat
+Content-Type: application/json
+
+{
+  "message": "주변에 적 몇 명이야? 정면에 장애물 있어?",
+  "backend": "faiss",
+  "distance": 85,
+  "body_error": 3,
+  "turret_error": 0.8,
+  "pitch_error": -0.1,
+  "enemy_speed": 0.4,
+  "top_k": 5
+}
 ```
 
-인덱스 재생성:
+Drive/fire action:
 
 ```text
-POST /api/rebuild
+GET /api/action?backend=faiss&distance=85&body_error=3&turret_error=0.8&pitch_error=-0.1&enemy_speed=0.4
+POST /api/action
 ```
 
-실시간 서버 연동:
+Example action response:
+
+```json
+{
+  "action": {
+    "action": "MOVE_LEFT",
+    "confidence": 0.72,
+    "reason": "Front lane is blocked; left side appears less blocked than right side.",
+    "control_hint": {
+      "move": "FORWARD",
+      "turn": "LEFT",
+      "fire": false
+    },
+    "safe_destination": {
+      "relative_angle_deg": -45.0,
+      "relative_distance_m": 12.0,
+      "world": {
+        "x": 121.3,
+        "y": 0.0,
+        "z": 203.6
+      }
+    },
+    "enemy_count": 2,
+    "front_blocked": true
+  },
+  "drive_plan": {
+    "available": true,
+    "control_mode": "path_follow",
+    "reason": "following local waypoints toward safe destination",
+    "command": {
+      "move_ws": "W",
+      "move_ad": "A",
+      "move_weight": 0.36,
+      "turn_weight": 0.42,
+      "wp_index": 0,
+      "heading_error": -18.5,
+      "target_yaw": 312.0,
+      "distance_to_wp_m": 6.0
+    },
+    "waypoints": [
+      {"x": 118.2, "y": 0.0, "z": 206.4}
+    ],
+    "goal": {"x": 121.3, "y": 0.0, "z": 203.6},
+    "min_clearance_m": 8.4,
+    "min_ttc_s": 3.2,
+    "replan_requested": false
+  }
+}
+```
+
+Possible high-level actions:
+
+```text
+FIRE       stop and fire
+HOLD_AIM   stop, align turret/pitch, do not fire yet
+MOVE_LEFT  move forward while steering left around obstacle
+MOVE_RIGHT move forward while steering right around obstacle
+REVERSE    back up because a front obstacle is too close
+SCAN       no confirmed enemy; scan cautiously
+REPLAN     route-level replanning requested by local planner risk checks
+```
+
+`safe_destination.world` is available only when the live LiDAR/YOLO payload exposes player position and body yaw, such as `playerPos` and `playerBodyX`. If those fields are not available, the response still includes body-relative movement intent through `relative_angle_deg` and `relative_distance_m`.
+
+## Local Drive Planner
+
+`drive_planner.py` is the RAG-side local movement planner adapted from the Tank Challenge driving module. It is intentionally output-only: it calculates simulator-style commands but does not send them to the tank by itself.
+
+Planner behavior:
+
+- Builds short waypoints from the current player pose to `safe_destination`
+- Selects a lookahead waypoint
+- Computes heading error and PD-style turn weight
+- Emits `move_ws`, `move_ad`, `move_weight`, and `turn_weight`
+- Stops on emergency positional clearance
+- Stops on low TTC
+- Marks `replan_requested` when the planned corridor is unsafe
+
+Common `drive_plan.control_mode` values:
+
+```text
+path_follow             follow generated local waypoints
+path_follow_replan_ahead follow for now, but request route replanning
+clearance_stop          stop because an obstacle is too close
+ttc_stop                stop because time-to-collision is too low
+corridor_replan_stop    stop and replan because the corridor is blocked nearby
+stationary_action       FIRE/HOLD_AIM/SCAN does not need waypoint following
+no_pose                 live player position or body yaw is unavailable
+no_goal                 safe destination is unavailable
+```
+
+Live query bridge:
 
 ```text
 GET /api/live-query?source=http://127.0.0.1:5000/fire_status&backend=faiss
 ```
 
-`live-query`는 기존 TankChallenge Flask 서버의 상태 API에서 현재 거리, 조준 오차, 적 속도 등의 값을 읽어 RAG query로 변환합니다.
+## CLI Examples
 
-지원하는 대표 필드명:
+Rule-based or vector search query:
 
-```text
-distance / distance_fire / target_distance
-body_error / body_error_fire
-turret_error / turret_error_fire
-pitch_error / pitch_error_fire
-enemy_speed / enemy_speed_fire
-lead_distance / lead_distance_fire
+```powershell
+python rag_decision_support\tank_rag.py query --backend faiss --distance 85 --body-error 3 --turret-error 0.8 --pitch-error -0.1 --enemy-speed 0.4
 ```
 
-## 현재 데이터셋
+LLM decision query:
 
-사용 로그:
-
-```text
-shot_analysis/shot_log_*.csv
-shot_analysis/moving_target_logs/moving_shot_log_*.csv
+```powershell
+python rag_decision_support\tank_rag_llm.py query --backend faiss --decision-mode llm --distance 85 --body-error 3 --turret-error 0.8 --pitch-error -0.1 --enemy-speed 0.4
 ```
 
-현재 인덱싱된 사례 수:
-
-```text
-116 cases
-```
-
-## 추천 로직
-
-1. 현재 상황을 자연어 query document로 변환합니다.
-2. SentenceTransformer로 query embedding을 생성합니다.
-3. FAISS 또는 ChromaDB에서 Top-k 유사 과거 사례를 검색합니다.
-4. 검색된 사례의 성공/실패 분포를 계산합니다.
-5. 성공 사례만 가중 평균하여 yaw/pitch 기준 보정값을 계산합니다.
-6. 실패 사례의 오차 방향을 반영해 반복 실패 패턴으로 향하지 않도록 보정합니다.
-7. 거리 bucket을 close/mid/far로 나누고, moving/stationary 표적 유형별 threshold를 다르게 적용합니다.
-8. 유사 성공률과 현재 조준 오차 조건을 함께 고려해 발사/보류를 추천합니다.
-
-## 자동 리포트 생성
-
-다음 명령으로 제출용 분석 리포트를 자동 생성합니다.
+Generate report:
 
 ```powershell
 python rag_decision_support\tank_rag.py report --backend faiss
 ```
 
-생성 파일:
+## Notes
 
-```text
-rag_decision_support/rag_report.md
-```
-
-리포트 포함 내용:
-
-```text
-데이터셋 요약
-보수적 fire/hold 판단 일치율
-평균 impact error
-FAISS / ChromaDB / Hybrid 검색 품질 비교표
-검색 예시와 Top-k 유사 사례
-추천 결과 JSON 예시
-PCA 이미지 링크
-추천 로직 설명
-```
-
-## 포트폴리오 요약 문장
-
-> TankChallenge 전투 로그를 자연어 사례 문서로 변환하고 Hugging Face SentenceTransformer로 임베딩을 생성한 뒤, FAISS와 ChromaDB 기반 Vector Search를 통해 현재 상황과 유사한 과거 명중/실패 사례를 검색하는 RAG 기반 의사결정 지원 시스템을 구현했습니다. 검색된 유사 사례를 바탕으로 발사 여부와 yaw/pitch 조준 보정값을 추천하며, 검색 품질 평가 지표와 PCA 기반 임베딩 시각화를 함께 제공했습니다.
-
-## 참고 사항
-
-- 첫 실행 시 Hugging Face 모델 다운로드 때문에 시간이 걸릴 수 있습니다.
-- Hugging Face 토큰 없이도 실행되지만, 미인증 요청 경고가 출력될 수 있습니다.
-- Plotly는 CDN으로 로드됩니다. CDN 접근이 불가능하면 정적 PCA PNG가 fallback으로 표시됩니다.
-- FAISS는 로컬 고속 검색 backend이고, ChromaDB는 영속 VectorDB workflow를 보여주기 위한 backend입니다.
-- Windows PowerShell에서 한글이 깨져 보이면 다음 명령으로 확인하세요.
-
-```powershell
-Get-Content .\README.md -Encoding utf8
-```
+- FAISS is the main fast local vector-search backend for shot cases.
+- ChromaDB is used both for shot-case vector storage and live tactical context storage.
+- The tactical context currently keeps a compact latest snapshot as `live_latest`; this avoids filling the DB with every LiDAR frame.
+- For richer long-term memory, add event snapshots only on meaningful changes such as enemy detected, target lock, obstacle block, shot fired, hit, or miss.

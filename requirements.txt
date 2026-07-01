@@ -7,3 +7,5 @@ faiss-cpu
 chromadb
 matplotlib
 scikit-learn
+openai
+google-generativeai

@@ -1,292 +1,540 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TankChallenge RAG Decision Support</title>
+  <title>TankChallenge RAG - {{ page_title }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
-  <header class="topbar">
+  <header class="app-header">
     <div>
-      <p class="eyebrow">TankChallenge Portfolio MVP</p>
-      <h1>RAG Decision Support Dashboard</h1>
+      <p class="eyebrow">TankChallenge RAG + LiDAR/YOLO</p>
+      <h1>{{ page_title }} 페이지</h1>
     </div>
-    <div class="status-pill {{ 'hold' if not result.recommendation.fire else 'fire' }}">
-      {{ 'FIRE' if result.recommendation.fire else 'HOLD / CORRECT' }}
+    <div class="header-status">
+      <span class="status-chip {{ 'paid' if paid_llm_enabled else 'free' }}">
+        {{ '유료 LLM 허용' if paid_llm_enabled else '무료 모드' }}
+      </span>
+      <span class="status-chip {{ 'fire' if result.recommendation.fire else 'hold' }}">
+        {{ 'FIRE' if result.recommendation.fire else 'HOLD' }}
+      </span>
+      <span class="status-chip neutral">{{ result.action.action if result.action else 'NO_ACTION' }}</span>
     </div>
   </header>
 
-  <main class="layout">
-    <section class="panel input-panel">
-      <div class="section-head">
-        <h2>Current Situation</h2>
-        <span>Top-k retrieval query</span>
+  <nav class="page-tabs" aria-label="주요 페이지">
+    <form action="{{ url_for('decision_page') }}" method="get">
+      <button type="submit" class="nav-button {{ 'active' if page == 'decision' else '' }}">의사결정</button>
+    </form>
+    <form action="{{ url_for('fire_page') }}" method="get">
+      <button type="submit" class="nav-button {{ 'active' if page == 'fire' else '' }}">사격</button>
+    </form>
+    <form action="{{ url_for('drive_page') }}" method="get">
+      <button type="submit" class="nav-button {{ 'active' if page == 'drive' else '' }}">주행</button>
+    </form>
+  </nav>
+
+  <main class="page-shell {{ page }}-page">
+    <aside class="panel query-panel">
+      <div class="panel-head">
+        <h2>입력 조건</h2>
+        <span>{{ result.backend|upper }}</span>
       </div>
-
       <form method="post" action="{{ url_for('query') }}" class="query-form">
+        <input type="hidden" name="page" value="{{ page }}">
         <label>
-          Search backend
+          검색 백엔드
           <select name="backend">
-            <option value="faiss" {{ 'selected' if result.backend == 'faiss' else '' }}>Hugging Face + FAISS Vector Search</option>
-            <option value="chroma" {{ 'selected' if result.backend == 'chroma' else '' }}>Hugging Face + ChromaDB Vector Store</option>
-            <option value="hybrid" {{ 'selected' if result.backend == 'hybrid' else '' }}>Numeric/Text Hybrid Baseline</option>
+            <option value="faiss" {{ 'selected' if result.backend == 'faiss' else '' }}>FAISS</option>
+            <option value="chroma" {{ 'selected' if result.backend == 'chroma' else '' }}>ChromaDB</option>
+            <option value="hybrid" {{ 'selected' if result.backend == 'hybrid' else '' }}>Hybrid</option>
           </select>
         </label>
-
         <label>
-          Target type
+          LLM Provider
+          <select name="llm_provider" {{ 'disabled' if not paid_llm_enabled else '' }}>
+            <option value="llama" {{ 'selected' if result.recommendation.llm_provider != 'gemini' else '' }}>Llama API</option>
+            <option value="gemini" {{ 'selected' if result.recommendation.llm_provider == 'gemini' else '' }}>Gemini</option>
+          </select>
+        </label>
+        <label>
+          LLM 모델
+          <input name="llm_model" placeholder="무료 모드에서는 사용 안 함" value="{{ result.recommendation.llm_model or '' }}" {{ 'disabled' if not paid_llm_enabled else '' }}>
+        </label>
+        {% if not paid_llm_enabled %}
+        <p class="free-mode-note">외부 LLM API 호출 차단 중입니다. 이 상태에서는 Llama/Gemini 과금이 발생하지 않습니다.</p>
+        {% endif %}
+        <label>
+          표적 유형
           <select name="target_type">
-            <option value="moving_enemy" {{ 'selected' if result.query.target_type == 'moving_enemy' else '' }}>Moving target</option>
-            <option value="stationary" {{ 'selected' if result.query.target_type == 'stationary' else '' }}>Stationary target</option>
+            <option value="moving_enemy" {{ 'selected' if result.query.target_type == 'moving_enemy' else '' }}>이동 표적</option>
+            <option value="stationary" {{ 'selected' if result.query.target_type == 'stationary' else '' }}>정지 표적</option>
           </select>
         </label>
-
+        <div class="field-grid">
+          <label>거리 m<input type="number" step="0.01" name="distance" value="{{ result.query.distance }}"></label>
+          <label>차체 yaw 오차<input type="number" step="0.01" name="body_error" value="{{ result.query.body_error }}"></label>
+          <label>포탑 yaw 오차<input type="number" step="0.01" name="turret_error" value="{{ result.query.turret_error }}"></label>
+          <label>pitch 오차<input type="number" step="0.01" name="pitch_error" value="{{ result.query.pitch_error }}"></label>
+          <label>적 속도<input type="number" step="0.01" name="enemy_speed" value="{{ result.query.enemy_speed }}"></label>
+          <label>리드 거리<input type="number" step="0.01" name="lead_distance" value="{{ result.query.lead_distance }}"></label>
+        </div>
         <label>
-          Distance (m)
-          <input type="number" step="0.01" name="distance" value="{{ result.query.distance }}">
-        </label>
-
-        <label>
-          Body yaw error (deg)
-          <input type="number" step="0.01" name="body_error" value="{{ result.query.body_error }}">
-        </label>
-
-        <label>
-          Turret yaw error (deg)
-          <input type="number" step="0.01" name="turret_error" value="{{ result.query.turret_error }}">
-        </label>
-
-        <label>
-          Pitch error (deg)
-          <input type="number" step="0.01" name="pitch_error" value="{{ result.query.pitch_error }}">
-        </label>
-
-        <label>
-          Enemy speed (m/s)
-          <input type="number" step="0.01" name="enemy_speed" value="{{ result.query.enemy_speed }}">
-        </label>
-
-        <label>
-          Lead distance (m)
-          <input type="number" step="0.01" name="lead_distance" value="{{ result.query.lead_distance }}">
-        </label>
-
-        <label>
-          Retrieved cases
+          검색 개수
           <input type="number" min="1" max="12" name="top_k" value="{{ result.matches|length }}">
         </label>
-
-        <button type="submit">Run Recommendation</button>
+        <button type="submit">다시 계산</button>
       </form>
-    </section>
+    </aside>
 
-    <section class="panel recommendation-panel">
-      <div class="section-head">
-        <h2>Recommendation</h2>
-        <span>Evidence-based retrieval decision</span>
-      </div>
+    {% if page == 'decision' %}
+    <section class="content-grid">
+      <section class="panel hero-panel">
+        <div class="panel-head">
+          <h2>최종 판단</h2>
+          <span>{{ result.decision_mode }}</span>
+        </div>
+        <div class="decision-card {{ 'fire' if result.recommendation.fire else 'hold' }}">
+          <strong>{{ '사격 권장' if result.recommendation.fire else '대기 또는 보정 권장' }}</strong>
+          <p>{{ result.recommendation.reason or result.recommendation.summary }}</p>
+        </div>
+        <div class="stat-grid three">
+          <div><span>신뢰도</span><strong>{{ '%.0f%%'|format((result.recommendation.confidence or 0) * 100) }}</strong></div>
+          <div><span>추천 행동</span><strong>{{ result.action.action if result.action else 'N/A' }}</strong></div>
+          <div><span>판단 임계값</span><strong>{{ result.recommendation.decision_threshold or 'N/A' }}</strong></div>
+        </div>
+      </section>
 
-      <div class="decision {{ 'fire' if result.recommendation.fire else 'hold' }}">
-        <strong>{{ 'Fire recommended' if result.recommendation.fire else 'Hold fire and correct aim' }}</strong>
-        <p>{{ result.recommendation.summary }}</p>
-      </div>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>실시간 전술 요약</h2>
+          <span id="liveStatus">{{ result.tactical_context.ingest_status or 'unknown' }}</span>
+        </div>
+        <div class="stat-grid four">
+          <div><span>적 수</span><strong id="enemyCount">{{ result.action.enemy_count if result.action else 'N/A' }}</strong></div>
+          <div><span>장애물 수</span><strong id="obstacleCount">{{ result.tactical_context.summary.obstacle_count if result.tactical_context.summary else 'N/A' }}</strong></div>
+          <div><span>전방 차단</span><strong id="frontBlocked">{{ result.action.front_blocked if result.action else 'N/A' }}</strong></div>
+          <div><span>권장 행동</span><strong id="liveAction">{{ result.action.action if result.action else 'N/A' }}</strong></div>
+        </div>
+      </section>
 
-      <div class="metrics-grid">
-        <div>
-          <span>Similar success rate</span>
-          <strong>{{ '%.0f%%'|format(result.recommendation.confidence * 100) }}</strong>
+      <section class="panel chat-panel">
+        <div class="panel-head">
+          <h2>의사결정 챗봇</h2>
+          <span>RAG + 전술 context</span>
         </div>
-        <div>
-          <span>Yaw correction</span>
-          <strong>{{ '%+.2f'|format(result.recommendation.yaw_correction_deg) }} deg</strong>
+        <div id="chatLog" class="chat-log">
+          <div class="chat-message assistant">현재 사격 조건, 주변 적, 장애물, 이동 판단을 질문할 수 있습니다.</div>
         </div>
-        <div>
-          <span>Pitch correction</span>
-          <strong>{{ '%+.2f'|format(result.recommendation.pitch_correction_deg) }} deg</strong>
-        </div>
-      </div>
+        <form id="chatForm" class="chat-form">
+          <input id="chatInput" name="message" autocomplete="off" placeholder="예: 지금 사격할까, 이동할까?">
+          <button type="submit">질문</button>
+        </form>
+      </section>
 
-      <div class="dataset-strip">
-        <div>
-          <span>Backend</span>
-          <strong class="backend-name">{{ result.backend|upper }}</strong>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>근거 케이스</h2>
+          <span>Top {{ result.matches|length }}</span>
         </div>
-        <div>
-          <span>Indexed</span>
-          <strong>{{ metrics.case_count }}</strong>
-        </div>
-        <div>
-          <span>Success</span>
-          <strong>{{ metrics.success_cases }}</strong>
-        </div>
-        <div>
-          <span>Failure</span>
-          <strong>{{ metrics.failure_cases }}</strong>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel quality-panel">
-      <div class="section-head">
-        <h2>Retrieval Quality</h2>
-        <span>Top-k diagnostics</span>
-      </div>
-
-      <div class="quality-grid">
-        <div>
-          <span>Top-k success/failure</span>
-          <strong>{{ result.quality.success_count }} / {{ result.quality.failure_count }}</strong>
-        </div>
-        <div>
-          <span>Avg impact error</span>
-          <strong>{{ '%.2f m'|format(result.quality.avg_impact_error) }}</strong>
-        </div>
-        <div>
-          <span>Avg success distance</span>
-          <strong>
-            {% if result.quality.avg_success_distance is not none %}
-              {{ '%.1f m'|format(result.quality.avg_success_distance) }}
-            {% else %}
-              N/A
-            {% endif %}
-          </strong>
-        </div>
-        <div>
-          <span>FAISS/Hybrid overlap</span>
-          <strong>{{ result.comparison.overlap_count }}</strong>
-        </div>
-      </div>
-
-      <div class="comparison-grid">
-        <div>
-          <h3>FAISS Vector Search</h3>
-          <p>Success {{ result.comparison.faiss.success_count }}, failure {{ result.comparison.faiss.failure_count }},
-             avg impact {{ '%.2f m'|format(result.comparison.faiss.avg_impact_error) }}</p>
-        </div>
-        <div>
-          <h3>ChromaDB Vector Store</h3>
-          <p>Success {{ result.comparison.chroma.success_count }}, failure {{ result.comparison.chroma.failure_count }},
-             avg impact {{ '%.2f m'|format(result.comparison.chroma.avg_impact_error) }}</p>
-        </div>
-        <div>
-          <h3>Hybrid Baseline</h3>
-          <p>Success {{ result.comparison.hybrid.success_count }}, failure {{ result.comparison.hybrid.failure_count }},
-             avg impact {{ '%.2f m'|format(result.comparison.hybrid.avg_impact_error) }}</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel cases-panel">
-      <div class="section-head">
-        <h2>Retrieved Similar Cases</h2>
-        <span>{{ result.matches|length }} cases</span>
-      </div>
-
-      <div class="case-list">
-        {% for match in result.matches %}
-        <article class="case-card {{ match.hit_label }}">
-          <div class="case-head">
+        <div class="case-list">
+          {% for match in result.matches %}
+          <article class="case-card {{ match.hit_label }}">
             <div>
               <strong>{{ match.case_id }}</strong>
-              <span>{{ match.source }}</span>
+              <span>{{ match.target_type }} / {{ match.distance }}m / {{ match.hit_label }}</span>
             </div>
-            <div class="score">{{ '%.3f'|format(match.score) }}</div>
-          </div>
-
-          <div class="case-stats">
-            <span>{{ match.hit_label }}</span>
-            <span>{{ '%.1f'|format(match.distance or 0) }}m</span>
-            <span>yaw {{ '%+.2f'|format(match.turret_error or 0) }} deg</span>
-            <span>pitch {{ '%+.2f'|format(match.pitch_error or 0) }} deg</span>
-            <span>impact {{ '%.2f'|format(match.impact_error or 0) }}m</span>
-          </div>
-
-          <p>{{ match.document }}</p>
-        </article>
-        {% endfor %}
-      </div>
+            <code>score={{ match.score }}, yaw={{ match.body_error }}, turret={{ match.turret_error }}, pitch={{ match.pitch_error }}</code>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
     </section>
+    {% endif %}
 
-    <section class="panel pca-panel">
-      <div class="section-head">
-        <h2>Interactive PCA Embedding Map</h2>
-        <span>384D embedding to 2D</span>
-      </div>
-      <div id="pcaPlot" class="plotly-panel"></div>
-      <img class="pca-image fallback-image" src="{{ url_for('static', filename='pca_embedding_map.png') }}" alt="PCA embedding map">
+    {% if page == 'fire' %}
+    <section class="content-grid">
+      <section class="panel hero-panel">
+        <div class="panel-head">
+          <h2>사격 판단</h2>
+          <span>{{ result.recommendation.llm_provider or 'rule' }}</span>
+        </div>
+        <div class="decision-card {{ 'fire' if result.recommendation.fire else 'hold' }}">
+          <strong>{{ '발사 가능' if result.recommendation.fire else '발사 보류' }}</strong>
+          <p>{{ result.recommendation.reason or result.recommendation.summary }}</p>
+        </div>
+        <div class="stat-grid three">
+          <div><span>Yaw 보정</span><strong>{{ '%+.2f'|format(result.recommendation.yaw_correction_deg or 0) }} deg</strong></div>
+          <div><span>Pitch 보정</span><strong>{{ '%+.2f'|format(result.recommendation.pitch_correction_deg or 0) }} deg</strong></div>
+          <div><span>Fire Hint</span><strong>{{ result.action.control_hint.fire if result.action and result.action.control_hint else 'N/A' }}</strong></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>표적과 위협</h2>
+          <span>LiDAR/YOLO</span>
+        </div>
+        <div class="stat-grid four">
+          <div><span>적 수</span><strong id="fireEnemyCount">{{ result.action.enemy_count if result.action else 'N/A' }}</strong></div>
+          <div><span>최근접 적</span><strong id="nearestEnemy">{% if result.action and result.action.nearest_enemy %}{{ result.action.nearest_enemy.distanceM }}m{% else %}N/A{% endif %}</strong></div>
+          <div><span>각도</span><strong id="nearestAngle">{% if result.action and result.action.nearest_enemy %}{{ result.action.nearest_enemy.angleDeg }} deg{% else %}N/A{% endif %}</strong></div>
+          <div><span>차단</span><strong id="fireBlocked">{{ result.action.front_blocked if result.action else 'N/A' }}</strong></div>
+        </div>
+      </section>
+
+      <section class="panel wide-panel">
+        <div class="panel-head">
+          <h2>LiDAR 극좌표</h2>
+          <span>차체 기준</span>
+        </div>
+        <canvas id="lidarView" width="900" height="420" aria-label="LiDAR view"></canvas>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>사격 근거</h2>
+          <span>유사 사례</span>
+        </div>
+        <div class="case-list">
+          {% for match in result.matches %}
+          <article class="case-card {{ match.hit_label }}">
+            <div>
+              <strong>{{ match.case_id }}</strong>
+              <span>{{ match.hit_label }} / impact={{ match.impact_error }} / range={{ match.range_error }}</span>
+            </div>
+            <code>{{ match.document }}</code>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
     </section>
+    {% endif %}
+
+    {% if page == 'drive' %}
+    <section class="content-grid">
+      <section class="panel hero-panel">
+        <div class="panel-head">
+          <h2>주행 판단</h2>
+          <span>{{ result.drive_plan.control_mode if result.drive_plan else 'idle' }}</span>
+        </div>
+        <div class="drive-card">
+          <strong>{{ result.action.action if result.action else 'NO_ACTION' }}</strong>
+          <p>{{ result.action.reason if result.action else '주행 판단 없음' }}</p>
+          {% if result.drive_plan %}
+          <code>WS={{ result.drive_plan.command.move_ws }}, AD={{ result.drive_plan.command.move_ad }}, move={{ result.drive_plan.command.move_weight }}, turn={{ result.drive_plan.command.turn_weight }}</code>
+          {% endif %}
+        </div>
+        <div class="stat-grid four">
+          <div><span>전방 차단</span><strong id="driveBlocked">{{ result.action.front_blocked if result.action else 'N/A' }}</strong></div>
+          <div><span>Clearance</span><strong>{{ result.drive_plan.min_clearance_m|default('N/A', true) if result.drive_plan else 'N/A' }}</strong></div>
+          <div><span>TTC</span><strong>{{ result.drive_plan.min_ttc_s|default('N/A', true) if result.drive_plan else 'N/A' }}</strong></div>
+          <div><span>재탐색</span><strong>{{ result.drive_plan.replan_requested|default(false, true) if result.drive_plan else false }}</strong></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>안전 좌표</h2>
+          <span>set_destination</span>
+        </div>
+        {% if result.action and result.action.safe_destination %}
+        <div class="destination-box">
+          <strong>
+            x={{ '%.1f'|format(result.action.safe_destination.world.x) if result.action.safe_destination.world else 'N/A' }},
+            z={{ '%.1f'|format(result.action.safe_destination.world.z) if result.action.safe_destination.world else 'N/A' }}
+          </strong>
+          <span>{{ '%.1f'|format(result.action.safe_destination.relative_distance_m or 0) }}m / {{ '%+.1f'|format(result.action.safe_destination.relative_angle_deg or 0) }} deg</span>
+          <button id="sendDestinationButton" type="button">목적지로 전송</button>
+          <p id="destinationStatus" class="muted-text"></p>
+        </div>
+        {% else %}
+        <p class="muted-text">현재 추천 안전 좌표가 없습니다.</p>
+        {% endif %}
+      </section>
+
+      <section class="panel wide-panel">
+        <div class="panel-head">
+          <h2>300 x 300 월드맵</h2>
+          <span>{{ result.world_map.filename if result.world_map else 'map' }}</span>
+        </div>
+        <div class="toolbar">
+          <label>
+            맵 파일
+            <select id="worldMapSelect">
+              {% if result.world_map %}
+              {% for map_name in result.world_map.available_maps %}
+              <option value="{{ map_name }}" {{ 'selected' if map_name == result.world_map.filename else '' }}>{{ map_name }}</option>
+              {% endfor %}
+              {% endif %}
+            </select>
+          </label>
+        </div>
+        <canvas id="worldMap" width="760" height="760" aria-label="World map"></canvas>
+      </section>
+
+      <section class="panel wide-panel">
+        <div class="panel-head">
+          <h2>전술 주행 뷰</h2>
+          <span>상대 좌표</span>
+        </div>
+        <canvas id="tacticalMap" width="900" height="420" aria-label="Tactical map"></canvas>
+      </section>
+    </section>
+    {% endif %}
   </main>
 
   <script>
-    async function renderPcaPlot() {
-      const fallback = document.querySelector(".fallback-image");
-      const target = document.getElementById("pcaPlot");
-      if (!window.Plotly) {
-        target.style.display = "none";
-        fallback.style.display = "block";
-        return;
-      }
+    const resultState = {{ result|tojson }};
+    let actionState = resultState.action || {};
+    let drivePlanState = resultState.drive_plan || {};
+    let tacticalState = resultState.tactical_context || {};
+    let worldMapState = resultState.world_map || {};
 
-      const response = await fetch("{{ url_for('api_pca_points') }}");
-      const payload = await response.json();
-      const points = payload.points || [];
-      const success = points.filter((point) => point.hit_label === "success");
-      const failure = points.filter((point) => point.hit_label !== "success");
-
-      function trace(name, rows, color) {
-        return {
-          type: "scatter",
-          mode: "markers",
-          name,
-          x: rows.map((row) => row.pca_x),
-          y: rows.map((row) => row.pca_y),
-          text: rows.map((row) => row.case_id),
-          customdata: rows.map((row) => [
-            row.hit_label,
-            row.target_type,
-            row.distance,
-            row.impact_error,
-            row.source,
-          ]),
-          hovertemplate:
-            "<b>%{text}</b><br>" +
-            "label: %{customdata[0]}<br>" +
-            "target: %{customdata[1]}<br>" +
-            "distance: %{customdata[2]:.1f}m<br>" +
-            "impact error: %{customdata[3]:.2f}m<br>" +
-            "source: %{customdata[4]}<extra></extra>",
-          marker: {
-            size: 10,
-            color,
-            opacity: 0.82,
-            line: { color: "#ffffff", width: 1 },
-          },
-        };
-      }
-
-      Plotly.newPlot(
-        target,
-        [
-          trace("success", success, "#0b7a53"),
-          trace("failure", failure, "#b3261e"),
-        ],
-        {
-          margin: { l: 48, r: 24, t: 24, b: 48 },
-          paper_bgcolor: "#ffffff",
-          plot_bgcolor: "#ffffff",
-          xaxis: { title: "PC1", gridcolor: "#d9e0ea" },
-          yaxis: { title: "PC2", gridcolor: "#d9e0ea" },
-          legend: { orientation: "h" },
-        },
-        { responsive: true, displaylogo: false }
-      );
-
-      fallback.style.display = "none";
+    function number(value, fallback = 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
     }
 
-    renderPcaPlot();
+    function drawMarker(ctx, x, y, color, label, radius = 6) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      if (label) {
+        ctx.fillStyle = "#dfe8ee";
+        ctx.font = "12px Segoe UI, sans-serif";
+        ctx.fillText(label, x + radius + 4, y - radius - 2);
+      }
+    }
+
+    function pointFromPolar(cx, cy, angleDeg, distance, maxRange, radius) {
+      const angle = number(angleDeg) * Math.PI / 180;
+      const r = Math.min(radius, Math.max(0, number(distance) / maxRange * radius));
+      return { x: cx + Math.sin(angle) * r, y: cy - Math.cos(angle) * r };
+    }
+
+    function drawPolar(canvasId, compact = false) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      const cx = w / 2;
+      const cy = h * 0.78;
+      const radius = Math.min(w * 0.44, h * 0.68);
+      const maxRange = 60;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#111820";
+      ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = "#30404c";
+      ctx.lineWidth = 1;
+      [15, 30, 45, 60].forEach((range) => {
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius * range / maxRange, Math.PI, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = "#8fa2af";
+        ctx.fillText(`${range}m`, cx + 8, cy - radius * range / maxRange);
+      });
+      for (let angle = -60; angle <= 60; angle += 30) {
+        const p = pointFromPolar(cx, cy, angle, maxRange, maxRange, radius);
+        ctx.strokeStyle = angle === 0 ? "#7dd3fc" : "#30404c";
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+      }
+      drawMarker(ctx, cx, cy, "#e8eef2", "전차", 7);
+      const enemy = actionState.nearest_enemy;
+      if (enemy) {
+        const p = pointFromPolar(cx, cy, enemy.angleDeg, enemy.distanceM, maxRange, radius);
+        drawMarker(ctx, p.x, p.y, "#ff6b6b", `적 ${number(enemy.distanceM).toFixed(1)}m`, 7);
+      }
+      (actionState.front_obstacles || []).slice(0, compact ? 8 : 16).forEach((obstacle) => {
+        const p = pointFromPolar(cx, cy, obstacle.angleDeg, obstacle.distanceM, maxRange, radius);
+        drawMarker(ctx, p.x, p.y, "#f7c948", "", 5);
+      });
+      const safe = actionState.safe_destination;
+      if (safe) {
+        const p = pointFromPolar(cx, cy, safe.relative_angle_deg, safe.relative_distance_m, maxRange, radius);
+        ctx.strokeStyle = "#2dd4bf";
+        ctx.setLineDash([6, 5]);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        drawMarker(ctx, p.x, p.y, "#2dd4bf", "안전", 7);
+      }
+    }
+
+    function drawWorldMap() {
+      const canvas = document.getElementById("worldMap");
+      if (!canvas || !worldMapState) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      const pad = 38;
+      const bounds = worldMapState.bounds || {x_min: 0, x_max: 300, z_min: 0, z_max: 300};
+      const xMin = number(bounds.x_min, 0);
+      const xMax = number(bounds.x_max, 300);
+      const zMin = number(bounds.z_min, 0);
+      const zMax = number(bounds.z_max, 300);
+      const mapW = w - pad * 2;
+      const mapH = h - pad * 2;
+      function toCanvas(x, z) {
+        return {
+          x: pad + (number(x) - xMin) / (xMax - xMin || 1) * mapW,
+          y: h - pad - (number(z) - zMin) / (zMax - zMin || 1) * mapH,
+        };
+      }
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#111820";
+      ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = "#31404c";
+      ctx.strokeRect(pad, pad, mapW, mapH);
+      ctx.font = "11px Segoe UI, sans-serif";
+      for (let v = 0; v <= 300; v += 50) {
+        const gx = toCanvas(v, 0).x;
+        const gy = toCanvas(0, v).y;
+        ctx.strokeStyle = v % 100 === 0 ? "#445461" : "#263540";
+        ctx.beginPath();
+        ctx.moveTo(gx, pad);
+        ctx.lineTo(gx, h - pad);
+        ctx.moveTo(pad, gy);
+        ctx.lineTo(w - pad, gy);
+        ctx.stroke();
+        ctx.fillStyle = "#8fa2af";
+        ctx.fillText(String(v), gx + 3, h - pad + 16);
+        ctx.fillText(String(v), 10, gy + 4);
+      }
+      (worldMapState.obstacles || []).forEach((obstacle) => {
+        const p = toCanvas(obstacle.x, obstacle.z);
+        const r = Math.max(3, number(obstacle.radius, 2) / 300 * mapW);
+        const kind = String(obstacle.type || "").toLowerCase();
+        ctx.fillStyle = kind.includes("tank") ? "#ff6b6b" : "#f7c948";
+        ctx.globalAlpha = 0.82;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+      const waypoints = drivePlanState.waypoints || [];
+      if (waypoints.length) {
+        ctx.strokeStyle = "#60a5fa";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        waypoints.forEach((wp, index) => {
+          const p = toCanvas(wp.x, wp.z);
+          if (index === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        });
+        ctx.stroke();
+      }
+      const safe = (actionState.safe_destination || {}).world || drivePlanState.goal;
+      if (safe) {
+        const p = toCanvas(safe.x, safe.z);
+        drawMarker(ctx, p.x, p.y, "#2dd4bf", "목적지", 7);
+      }
+      const summaryPose = (((tacticalState.summary || {}).player_pose || {}).position) || {};
+      const pose = ((actionState.safe_destination || {}).player_pose) || {
+        x: summaryPose.x,
+        z: summaryPose.z,
+        body_yaw_deg: ((tacticalState.summary || {}).player_pose || {}).body_yaw_deg,
+      };
+      if (pose && pose.x !== undefined && pose.z !== undefined) {
+        const p = toCanvas(pose.x, pose.z);
+        drawMarker(ctx, p.x, p.y, "#e8eef2", "전차", 7);
+        const yaw = number(pose.body_yaw_deg, 0);
+        const nose = toCanvas(number(pose.x) + Math.sin(yaw * Math.PI / 180) * 10, number(pose.z) + Math.cos(yaw * Math.PI / 180) * 10);
+        ctx.strokeStyle = "#e8eef2";
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(nose.x, nose.y);
+        ctx.stroke();
+      }
+    }
+
+    async function refreshLive() {
+      try {
+        const response = await fetch("{{ url_for('api_tactical_live') }}", { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) return;
+        tacticalState = { ...tacticalState, ingest_status: payload.ingest_status, summary: payload.summary || {} };
+        actionState = payload.action || actionState;
+        drivePlanState = payload.drive_plan || drivePlanState;
+        document.getElementById("liveStatus")?.replaceChildren(document.createTextNode(payload.ingest_status || "unknown"));
+        document.getElementById("enemyCount")?.replaceChildren(document.createTextNode(String((payload.action || {}).enemy_count ?? "N/A")));
+        document.getElementById("frontBlocked")?.replaceChildren(document.createTextNode(String((payload.action || {}).front_blocked ?? "N/A")));
+        document.getElementById("liveAction")?.replaceChildren(document.createTextNode(String((payload.action || {}).action ?? "N/A")));
+        drawPolar("lidarView");
+        drawPolar("tacticalMap", true);
+        drawWorldMap();
+      } catch (error) {
+        console.warn(error);
+      }
+    }
+
+    document.getElementById("worldMapSelect")?.addEventListener("change", async (event) => {
+      const response = await fetch(`{{ url_for('api_world_map') }}?map_file=${encodeURIComponent(event.target.value)}`);
+      worldMapState = await response.json();
+      drawWorldMap();
+    });
+
+    document.getElementById("sendDestinationButton")?.addEventListener("click", async () => {
+      const status = document.getElementById("destinationStatus");
+      const destination = (actionState.safe_destination || {}).world;
+      if (!destination) {
+        status.textContent = "전송할 안전 좌표가 없습니다.";
+        return;
+      }
+      status.textContent = "전송 중...";
+      try {
+        const response = await fetch("{{ url_for('api_control_set_destination') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ destination }),
+        });
+        const payload = await response.json();
+        status.textContent = response.ok ? "목적지 전송 완료" : `전송 실패: ${payload.message || payload.error}`;
+      } catch (error) {
+        status.textContent = `전송 실패: ${error.message}`;
+      }
+    });
+
+    document.getElementById("chatForm")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = document.getElementById("chatInput");
+      const log = document.getElementById("chatLog");
+      const message = input.value.trim();
+      if (!message) return;
+      input.value = "";
+      log.insertAdjacentHTML("beforeend", `<div class="chat-message user"></div>`);
+      log.lastElementChild.textContent = message;
+      const waiting = document.createElement("div");
+      waiting.className = "chat-message assistant";
+      waiting.textContent = "생각 중...";
+      log.appendChild(waiting);
+      try {
+        const response = await fetch("{{ url_for('api_chat') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...resultState.query, message }),
+        });
+        const payload = await response.json();
+        waiting.textContent = (payload.chat || {}).answer || payload.error || "응답 없음";
+      } catch (error) {
+        waiting.textContent = `오류: ${error.message}`;
+      }
+      log.scrollTop = log.scrollHeight;
+    });
+
+    drawPolar("lidarView");
+    drawPolar("tacticalMap", true);
+    drawWorldMap();
+    refreshLive();
+    setInterval(refreshLive, 1500);
   </script>
 </body>
 </html>

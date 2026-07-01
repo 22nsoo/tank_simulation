@@ -79,6 +79,22 @@ except Exception as exc:
 app = Flask(__name__)
 state_lock = Lock()
 
+try:
+    try:
+        from integrated_control import IntegratedDriveFireController
+    except ModuleNotFoundError:
+        from rag_decision_support.integrated_control import IntegratedDriveFireController
+    integrated_control_import_error: str | None = None
+except Exception as exc:
+    IntegratedDriveFireController = None
+    integrated_control_import_error = f"{type(exc).__name__}: {exc}"
+
+integrated_controller = (
+    IntegratedDriveFireController()
+    if IntegratedDriveFireController is not None
+    else None
+)
+
 # ===========================================================================
 # 1. Operator settings
 # ===========================================================================
@@ -343,12 +359,40 @@ calibration: dict[str, Any] = {
 
 # YOLO runs slower than LiDAR and never blocks /detect.
 BASE_DIR = Path(__file__).resolve().parent
-YOLO_MODEL_PATH = BASE_DIR / os.getenv("YOLO_MODEL_FILE", "YOLO.pt")
+PROJECT_ROOT = BASE_DIR.parent
+ASSET_DIR = Path(os.getenv("TANK_RAG_ASSET_DIR", str(PROJECT_ROOT))).resolve()
+
+
+def resolve_runtime_file(env_name: str, default_name: str) -> Path:
+    raw = os.getenv(env_name, default_name)
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate
+    for base in (BASE_DIR, ASSET_DIR, PROJECT_ROOT):
+        path = base / candidate
+        if path.exists():
+            return path
+    return ASSET_DIR / candidate
+
+
+def _discover_local_map_files() -> list[Path]:
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for base in (BASE_DIR, ASSET_DIR, PROJECT_ROOT):
+        for path in sorted(base.glob("*.map")):
+            resolved = path.resolve()
+            if resolved not in seen and path.is_file():
+                seen.add(resolved)
+                result.append(path)
+    return sorted(result, key=lambda item: item.name.lower())
+
+
+YOLO_MODEL_PATH = resolve_runtime_file("YOLO_MODEL_FILE", "YOLO.pt")
 
 # Optional precomputed terrain-height map.
 # hill_map_height.csv columns: x,z,y,...  The map is used only for terrain base
 # height estimation; LiDAR points remain the source for object distance/angle.
-HILL_MAP_HEIGHT_FILE = BASE_DIR / os.getenv("HILL_MAP_HEIGHT_FILE", "hill_map_height.csv")
+HILL_MAP_HEIGHT_FILE = resolve_runtime_file("HILL_MAP_HEIGHT_FILE", "hill_map_height.csv")
 HILL_MAP_HEIGHT_ENABLED = env_bool("HILL_MAP_HEIGHT_ENABLED", True)
 _hill_map_height_grid: dict[tuple[int, int], float] = {}
 hill_map_height_state: dict[str, Any] = {
@@ -556,9 +600,12 @@ FUSED_COLORS = {
 # Dynamic objects need a live world-position feed from the simulator or from a
 # debug endpoint.  A map's initial coordinate is not exact after an enemy tank
 # moves.
-GROUND_TRUTH_FILE = BASE_DIR / "ground_truth_objects.json"
-GT_ERROR_LOG_FILE = BASE_DIR / "gt_error_log.csv"
-GT_ACTIVE_MAP_SESSION_FILE = BASE_DIR / "active_map_gt_session.json"
+GROUND_TRUTH_FILE = resolve_runtime_file("GROUND_TRUTH_FILE", "ground_truth_objects.json")
+GT_ERROR_LOG_FILE = resolve_runtime_file("GT_ERROR_LOG_FILE", "gt_error_log.csv")
+GT_ACTIVE_MAP_SESSION_FILE = resolve_runtime_file(
+    "GT_ACTIVE_MAP_SESSION_FILE",
+    "active_map_gt_session.json",
+)
 
 SERVER_STARTED_AT = datetime.now().isoformat(timespec="seconds")
 SERVER_SESSION_ID = uuid.uuid4().hex[:12]
@@ -2886,7 +2933,11 @@ def resolve_local_map_path(path_value: str | None = None, filename: str | None =
         raise ValueError("Use filename=<your_map_file.map> or path=<full_path_to_map_file>.")
     candidate = Path(raw)
     if not candidate.is_absolute():
-        candidate = BASE_DIR / candidate
+        for base in (BASE_DIR, ASSET_DIR, PROJECT_ROOT):
+            resolved = base / candidate
+            if resolved.exists():
+                return resolved
+        candidate = ASSET_DIR / candidate
     return candidate
 
 
@@ -6311,7 +6362,51 @@ def get_action():
         cache = latest_cache
         turret_state = dict(latest_turret)
 
-    action = build_seek_attack_action(cache, turret_state)
+    if integrated_controller is not None:
+        previous_auto_fire = bool(aim_settings.get("autoFireEnabled", True))
+        aim_settings["autoFireEnabled"] = False
+        try:
+            legacy_aim_action = build_seek_attack_action(cache, turret_state)
+        finally:
+            aim_settings["autoFireEnabled"] = previous_auto_fire
+        fire_targets_snapshot = build_fire_team_targets(
+            cache,
+            turret_state,
+            tank_only=True,
+            max_targets=1,
+        )
+        if not fire_targets_snapshot:
+            fire_targets_snapshot = build_lidar_tank_like_fire_targets(
+                cache,
+                turret_state,
+                max_targets=1,
+            )
+        action = integrated_controller.build_action(
+            body,
+            cache,
+            turret_state,
+            fire_targets_snapshot,
+            legacy_aim_action=legacy_aim_action,
+        )
+        with state_lock:
+            aim_state["integratedControl"] = json_copy(integrated_controller.status())
+            if bool(action.get("fire")):
+                fire_state["fireCount"] = int(fire_state.get("fireCount", 0)) + 1
+                fire_state["lastFireAt"] = now_text()
+                fire_state["lastFireMonotonic"] = monotonic()
+                fire_state["lastFireTarget"] = json_copy(fire_targets_snapshot[0] if fire_targets_snapshot else None)
+                fire_state["lastBlockedReason"] = None
+            else:
+                fire_state["lastBlockedReason"] = (
+                    (action.get("debug") or {}).get("fire", {}).get("reason")
+                    or fire_state.get("lastBlockedReason")
+                )
+    else:
+        action = build_seek_attack_action(cache, turret_state)
+        action["debug"] = {
+            **(action.get("debug") or {}),
+            "integratedControlError": integrated_control_import_error,
+        }
     return jsonify(action)
 
 
@@ -6510,10 +6605,90 @@ def build_fire_team_targets(
     return targets[: max(1, int(max_targets))]
 
 
+def make_lidar_tank_like_fire_target(cluster: dict[str, Any], cache: FrameCache, turret_state: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a fire target from a LiDAR-only tank-like cluster.
+
+    YOLO-fused targets stay preferred. This fallback lets the fire controller
+    use LiDAR tank-like geometry when YOLO has not produced a fused object yet.
+    """
+    if not bool(cluster.get("tankLike", False)):
+        return None
+    angle = safe_float(cluster.get("angleDeg"), None)
+    distance = safe_float(cluster.get("hitboxCenterDistanceM"), None)
+    if distance is None:
+        distance = safe_float(cluster.get("surfaceDistanceM"), safe_float(cluster.get("distanceM"), None))
+    pitch = safe_float(cluster.get("aimPitchDeg"), None)
+    if angle is None or distance is None:
+        return None
+    aim_point = cluster.get("aimPointWorld") or cluster.get("surfaceCenterWorld") or cluster.get("worldCenter")
+    if not isinstance(aim_point, dict):
+        return None
+    current_yaw = current_turret_body_yaw_deg(cache, turret_state)
+    current_pitch = current_turret_pitch_deg(turret_state)
+    yaw_error = normalize_signed_angle(float(angle) - float(current_yaw))
+    pitch_error = (float(pitch) - float(current_pitch)) if pitch is not None else None
+    return {
+        "targetId": f"lidar_tank_like:{cluster.get('objectId', cluster.get('clusterId', 'unknown'))}",
+        "source": "LIDAR_TANK_LIKE",
+        "frameSeq": cache.seq,
+        "simulationTime": cache.simulation_time,
+        "freshAgeSec": None,
+        "className": "LiDAR_TANK_LIKE",
+        "semanticClass": "enemy_tank",
+        "confidence": None,
+        "isTank": True,
+        "isFireCandidate": True,
+        "distanceM": round_float(distance),
+        "surfaceDistanceM": round_float(cluster.get("surfaceDistanceM", distance)),
+        "medianDistanceM": round_float(cluster.get("medianDistanceM"), 3, None),
+        "bodyYawDeg": round_float(angle),
+        "aimPitchDeg": round_float(pitch, 3, None),
+        "turretYawErrorDeg": round_float(yaw_error),
+        "turretPitchErrorDeg": round_float(pitch_error, 3, None),
+        "world": {
+            "aimPoint": json_copy(aim_point),
+            "center": json_copy(cluster.get("worldCenter")),
+            "surfaceCenter": json_copy(cluster.get("surfaceCenterWorld")),
+            "bounds": json_copy(cluster.get("worldBounds")),
+        },
+        "geometry": {
+            "pointCount": int(cluster.get("pointCount", 0) or 0),
+            "visibleWidthM": round_float(cluster.get("visibleWidthM"), 3, None),
+            "heightSpanM": round_float(cluster.get("heightSpanM"), 3, None),
+            "objectHeightAboveTerrainM": round_float(cluster.get("objectHeightAboveTerrainM"), 3, None),
+            "aimHeightAboveBaseM": round_float(cluster.get("aimHeightAboveBaseM"), 3, None),
+            "terrainBaseYWorldM": round_float(cluster.get("terrainBaseYWorldM"), 3, None),
+            "objectTopYWorldM": round_float(cluster.get("objectTopYWorldM"), 3, None),
+            "depthSpanM": round_float(cluster.get("depthSpanM"), 3, None),
+            "verticalityRatio": round_float(cluster.get("verticalityRatio"), 3, None),
+        },
+        "quality": {
+            "fusionMethod": "lidar_tank_like_fallback",
+            "tankLikeReason": cluster.get("tankLikeReason"),
+            "source": "lidar_cluster",
+        },
+    }
+
+
+def build_lidar_tank_like_fire_targets(
+    cache: FrameCache,
+    turret_state: dict[str, Any],
+    max_targets: int = 4,
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for cluster in cache.clusters:
+        target = make_lidar_tank_like_fire_target(cluster, cache, turret_state)
+        if target is not None:
+            targets.append(target)
+    targets.sort(key=lambda item: float(item.get("distanceM") or 9999.0))
+    return targets[: max(1, int(max_targets))]
+
+
 @app.route("/fire_targets", methods=["GET"])
 @app.route("/shooting_targets", methods=["GET"])
 def fire_targets():
     tank_only = safe_bool(request.args.get("tankOnly"), True)
+    include_lidar_fallback = safe_bool(request.args.get("includeLidarFallback"), True)
     max_targets = int(safe_float(request.args.get("limit"), 8) or 8)
     with state_lock:
         cache = latest_cache
@@ -6521,14 +6696,24 @@ def fire_targets():
         aim_snapshot = json_copy(aim_state)
         fire_snapshot = json_copy(fire_state)
     targets = build_fire_team_targets(cache, turret_state, tank_only=tank_only, max_targets=max_targets)
+    if include_lidar_fallback and len(targets) < max_targets:
+        existing_ids = {str(item.get("targetId")) for item in targets}
+        for target in build_lidar_tank_like_fire_targets(cache, turret_state, max_targets=max_targets):
+            if str(target.get("targetId")) in existing_ids:
+                continue
+            targets.append(target)
+            existing_ids.add(str(target.get("targetId")))
+            if len(targets) >= max_targets:
+                break
     return jsonify({
         "status": "success",
         "contract": "fire_team_targets_v1_compact_world_coordinates",
-        "description": "Only LiDAR/YOLO-fused object summaries are returned; raw LiDAR points are not exposed.",
+        "description": "Compact fire targets from YOLO/LiDAR fusion, with optional LiDAR tank-like fallback; raw LiDAR points are not exposed.",
         "frameSeq": cache.seq,
         "simulationTime": cache.simulation_time,
         "targetCount": len(targets),
         "tankOnly": bool(tank_only),
+        "includeLidarFallback": bool(include_lidar_fallback),
         "targets": targets,
         "selectedTarget": aim_snapshot.get("selectedTarget"),
         "confirmedTarget": aim_snapshot.get("confirmedTarget"),
@@ -6560,6 +6745,39 @@ def impact_status():
     })
 
 
+@app.route("/control_status", methods=["GET"])
+def control_status():
+    if integrated_controller is None:
+        return jsonify({
+            "status": "error",
+            "integratedControlAvailable": False,
+            "error": integrated_control_import_error,
+        }), 503
+    return jsonify({
+        "status": "success",
+        "integratedControlAvailable": True,
+        "control": integrated_controller.status(),
+    })
+
+
+@app.route("/control_update", methods=["GET", "POST"])
+def control_update():
+    if integrated_controller is None:
+        return jsonify({
+            "status": "error",
+            "integratedControlAvailable": False,
+            "error": integrated_control_import_error,
+        }), 503
+    payload = request.get_json(silent=True) or {}
+    for key in ("driveEnabled", "fireEnabled", "engagePausesDrive", "clearDestination"):
+        if key in request.args:
+            payload[key] = safe_bool(request.args.get(key), bool(payload.get(key, False)))
+    return jsonify({
+        "status": "success",
+        "control": integrated_controller.update_settings(payload),
+    })
+
+
 @app.route("/action_debug", methods=["GET"])
 def action_debug():
     with state_lock:
@@ -6573,6 +6791,11 @@ def action_debug():
                 "latestPlayer": json_copy(latest_player_state),
                 "validClusters": json_copy(cache.clusters),
                 "lastYoloFusedObjects": json_copy(yolo_state.get("latestFusedObjects", [])),
+                "integratedControl": (
+                    json_copy(integrated_controller.status())
+                    if integrated_controller is not None
+                    else {"available": False, "error": integrated_control_import_error}
+                ),
             }
         )
 
@@ -6787,7 +7010,7 @@ def cluster_world_point_dict(item: dict[str, Any]) -> dict[str, float] | None:
 
 def local_map_files() -> list[Path]:
     """Return local .map files sorted by name."""
-    return sorted(path for path in BASE_DIR.glob("*.map") if path.is_file())
+    return _discover_local_map_files()
 
 
 def summarize_lidar_gt_matches(matches: list[dict[str, Any]]) -> dict[str, Any]:
@@ -6934,8 +7157,8 @@ def ensure_default_map_gt_available() -> dict[str, Any]:
     Priority:
       1) already-registered GT objects
       2) persisted map restored by /map_gt_load
-      3) NewMap.map next to this script
-      4) exactly one .map file next to this script
+      3) NewMap.map in the RAG folder or project asset folder
+      4) exactly one .map file in the configured search folders
 
     If multiple .map files exist and none was loaded, the user must choose one
     with /map_gt_load?filename=YOUR.map&clearExisting=true.
@@ -6946,13 +7169,13 @@ def ensure_default_map_gt_available() -> dict[str, Any]:
     if existing_count > 0:
         return {"status": "already_loaded", "registeredCount": existing_count}
 
-    preferred = BASE_DIR / "NewMap.map"
+    preferred = resolve_local_map_path(filename="NewMap.map")
     if preferred.exists():
-        return load_map_ground_truth(filename=preferred.name, clear_existing=True, persist_selection=True)
+        return load_map_ground_truth(path_value=str(preferred), clear_existing=True, persist_selection=True)
 
-    maps = sorted(path for path in BASE_DIR.glob("*.map") if path.is_file())
+    maps = local_map_files()
     if len(maps) == 1:
-        return load_map_ground_truth(filename=maps[0].name, clear_existing=True, persist_selection=True)
+        return load_map_ground_truth(path_value=str(maps[0]), clear_existing=True, persist_selection=True)
 
     return {
         "status": "not_loaded",
@@ -7107,7 +7330,12 @@ def score_all_local_maps_against_lidar(
     """
     maps = local_map_files()
     if not maps:
-        return {"status": "no_map_files", "baseDir": str(BASE_DIR), "results": []}
+        return {
+            "status": "no_map_files",
+            "baseDir": str(BASE_DIR),
+            "assetDir": str(ASSET_DIR),
+            "results": [],
+        }
 
     with state_lock:
         previous_enabled = bool(map_cycle_settings.get("enabled", False))
@@ -7119,7 +7347,7 @@ def score_all_local_maps_against_lidar(
             map_cycle_settings["enabled"] = False
 
         for path in maps:
-            load_result = load_map_ground_truth(filename=path.name, clear_existing=True, persist_selection=False)
+            load_result = load_map_ground_truth(path_value=str(path), clear_existing=True, persist_selection=False)
             compare = build_lidar_gt_comparisons(
                 cache,
                 max_items=max_items,
@@ -7145,13 +7373,14 @@ def score_all_local_maps_against_lidar(
         best = results[0] if results else None
 
         if apply_best and best is not None:
-            load_map_ground_truth(filename=str(best["filename"]), clear_existing=True, persist_selection=True)
+            load_map_ground_truth(path_value=str(best["path"]), clear_existing=True, persist_selection=True)
         elif previous_active:
             load_map_ground_truth(path_value=str(previous_active), clear_existing=True, persist_selection=False)
 
         return {
             "status": "success",
             "baseDir": str(BASE_DIR),
+            "assetDir": str(ASSET_DIR),
             "applyBest": bool(apply_best),
             "best": json_copy(best),
             "results": json_copy(results),
@@ -8976,11 +9205,13 @@ def gt_state_debug():
 
 @app.route("/map_gt_list", methods=["GET"])
 def map_gt_list():
-    maps = sorted(path.name for path in BASE_DIR.glob("*.map") if path.is_file())
+    maps = local_map_files()
     return jsonify(
         {
             "baseDir": str(BASE_DIR),
-            "mapFiles": maps,
+            "assetDir": str(ASSET_DIR),
+            "mapFiles": [path.name for path in maps],
+            "mapPaths": [str(path) for path in maps],
             "usage": "Open /map_gt_load?filename=YOUR_FILE.map&clearExisting=true",
         }
     )
@@ -8992,7 +9223,7 @@ def map_gt_select():
     """Load one .map from the web dashboard.
 
     Supports either:
-      - filename=local_file.map  -> file next to this Python script
+      - filename=local_file.map  -> file in the RAG folder or asset folder
       - path=C:\\...\\file.map   -> pasted full path on the same PC running Python
     """
     filename = request.args.get("filename") or request.args.get("map")
@@ -9002,6 +9233,7 @@ def map_gt_select():
             "status": "error",
             "message": "Use /map_gt_select?filename=YOUR.map or /map_gt_select?path=FULL_PATH.map",
             "baseDir": str(BASE_DIR),
+            "assetDir": str(ASSET_DIR),
             "mapFiles": [path.name for path in local_map_files()],
         }), 400
     clear_existing = safe_bool(request.args.get("clearExisting"), True)
@@ -9026,6 +9258,7 @@ def map_gt_select():
         "status": "success" if result.get("status") == "success" else "error",
         "loadedMap": loaded_name,
         "baseDir": str(BASE_DIR),
+        "assetDir": str(ASSET_DIR),
         "activeMapFile": ground_truth_state.get("activeMapFile"),
         "result": json_copy(result),
         "cycle": json_copy(map_cycle_settings),
@@ -9073,6 +9306,8 @@ def map_upload_load():
         "status": "success" if result.get("status") == "success" else "error",
         "loadedMap": filename,
         "savedPath": str(path),
+        "baseDir": str(BASE_DIR),
+        "assetDir": str(ASSET_DIR),
         "result": json_copy(result),
         "mapFiles": [p.name for p in local_map_files()],
     }), (200 if result.get("status") == "success" else 400)
@@ -9313,7 +9548,13 @@ def stereo_image():
 
 @app.route("/update_bullet", methods=["POST"])
 def update_bullet():
-    return jsonify({"status": "OK"})
+    payload = request.get_json(silent=True) or {}
+    forwarded = (
+        integrated_controller.handle_bullet(payload)
+        if integrated_controller is not None
+        else {"forwarded": False, "reason": integrated_control_import_error}
+    )
+    return jsonify({"status": "OK", "fireLogicImpactLog": forwarded})
 
 
 @app.route("/update_obstacle", methods=["POST"])
@@ -9349,7 +9590,17 @@ def collision():
 @app.route("/set_destination", methods=["POST"])
 def set_destination():
     data = request.get_json(silent=True) or {}
-    return jsonify({"status": "OK", "destination": data.get("destination")})
+    if integrated_controller is None:
+        return jsonify({
+            "status": "error",
+            "message": "integrated control is unavailable",
+            "error": integrated_control_import_error,
+        }), 503
+    try:
+        result = integrated_controller.set_destination(data)
+    except Exception as exc:
+        return jsonify({"status": "error", "message": f"invalid destination: {exc}"}), 400
+    return jsonify(result)
 
 
 if bool(ground_truth_settings.get("autoLoadFile", True)):
